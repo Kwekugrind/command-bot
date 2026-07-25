@@ -117,10 +117,9 @@ async function handleHelp(chatId) {
   await sendTelegram(chatId,
     `🤖 *Command Bot — Available Commands*\n\n` +
     `/status — All currently open trades\n` +
-    `/report — Weekly summary (all bots)\n` +
-    `/report daily — Today's summary\n` +
-    `/report weekly — This week's summary\n` +
-    `/report monthly — This month's summary\n` +
+    `/reportweekly — Weekly summary (all bots)\n` +
+    `/reportdaily — Today's summary\n` +
+    `/reportmonthly — This month's summary\n` +
     `/help — Show this message`
   );
 }
@@ -155,11 +154,11 @@ async function getUpdates() {
 
     if (text === "/status") {
       await handleStatus(chatId);
-    } else if (text === "/report" || text === "/report weekly") {
+    } else if (text === "/reportweekly" || text === "/report" || text === "/report weekly") {
       await handleReport(chatId, 7, "Weekly Report");
-    } else if (text === "/report daily") {
+    } else if (text === "/reportdaily" || text === "/report daily") {
       await handleReport(chatId, 1, "Daily Report");
-    } else if (text === "/report monthly") {
+    } else if (text === "/reportmonthly" || text === "/report monthly") {
       await handleReport(chatId, 30, "Monthly Report");
     } else if (text === "/help") {
       await handleHelp(chatId);
