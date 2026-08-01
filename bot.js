@@ -5,14 +5,24 @@ const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const ALLOWED_CHAT_ID = process.env.TG_CHAT_ID;
 
 const REPOS = [
-  { name: "Test-Bot",       label: "Test Bot (V100 Live)"   },
-  { name: "Milk",           label: "Milk Machine (V50)"     },
-  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)"     },
-  { name: "coffee",         label: "Coffee Machine (Step)"  },
-  { name: "OmniSight",      label: "OmniSight (V100)"       },
-  { name: "ice-cream",      label: "Ice Cream (V10)"        },
-  { name: "Tea",            label: "Tea Machine (V25)"      },
+  { name: "Test-Bot",      label: "Test Bot (V100 Live)", symbol: "V100L" },
+  { name: "Milk",          label: "Milk Machine (V50)",   symbol: "V50"   },
+  { name: "Lery-s-Alerts", label: "Lery's Elite (V75)",   symbol: "V75"   },
+  { name: "coffee",        label: "Coffee Machine (Step)", symbol: "V75S"  },
+  { name: "OmniSight",     label: "OmniSight (V100)",     symbol: "V100"  },
+  { name: "ice-cream",     label: "Ice Cream (V10)",      symbol: "V10"   },
+  { name: "Tea",           label: "Tea Machine (V25)",    symbol: "V25"   },
 ];
+
+const SYMBOL_MAP = {
+  "V10":   "ice-cream",
+  "V25":   "Tea",
+  "V50":   "Milk",
+  "V75":   "Lery-s-Alerts",
+  "V75S":  "coffee",
+  "V100":  "OmniSight",
+  "V100L": "Test-Bot",
+};
 
 let state = { lastUpdateId: 0 };
 try {
@@ -64,20 +74,26 @@ async function handleStatus(chatId) {
   await sendTelegram(chatId, message);
 }
 
-async function handleReport(chatId, daysBack, title) {
-  let message = `📊 *${title}*\n_All Bots Combined_\n\n`;
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - daysBack);
+async function buildReport(repos, fromDate, toDate, title) {
+  let message = `📊 *${title}*\n`;
+  if (fromDate) {
+    const from = fromDate.toISOString().slice(0, 10);
+    const to = toDate.toISOString().slice(0, 10);
+    message += from === to ? `_${from}_\n\n` : `_${from} → ${to}_\n\n`;
+  }
+  message += "\n";
 
   let totalTrades = 0, totalWins = 0, totalLosses = 0, totalNetR = 0;
   let hasAnyTrades = false;
 
-  for (const repo of REPOS) {
+  for (const repo of repos) {
     const trades = await fetchTrades(repo.name);
-    const period = trades.filter(t =>
-      t.result && t.result !== "CANCELLED" &&
-      new Date(t.closeTime) >= cutoff
-    );
+    const period = trades.filter(t => {
+      if (!t.result || t.result === "CANCELLED") return false;
+      if (!fromDate) return true;
+      const closeTime = new Date(t.closeTime);
+      return closeTime >= fromDate && closeTime <= toDate;
+    });
 
     if (period.length === 0) {
       message += `*${repo.label}*: No trades\n`;
@@ -100,26 +116,118 @@ async function handleReport(chatId, daysBack, title) {
     totalNetR += netR;
   }
 
-  if (hasAnyTrades) {
+  if (hasAnyTrades && repos.length > 1) {
     const totalWR = ((totalWins / totalTrades) * 100).toFixed(1);
     const totalNetRStr = totalNetR >= 0 ? `+${totalNetR.toFixed(1)}R` : `${totalNetR.toFixed(1)}R`;
     message += `━━━━━━━━━━━━━━━━━━━━\n`;
     message += `*COMBINED (${totalTrades} trades)*\n`;
     message += `${totalWins}W / ${totalLosses}L  |  WR: ${totalWR}%  |  ${totalNetRStr}`;
-  } else {
+  } else if (!hasAnyTrades) {
     message += `No closed trades found in this period.`;
   }
 
+  return message;
+}
+
+async function handleReport(chatId, daysBack, title) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - daysBack);
+  cutoff.setHours(0, 0, 0, 0);
+  const now = new Date();
+  now.setHours(23, 59, 59, 999);
+  const message = await buildReport(REPOS, cutoff, now, title);
   await sendTelegram(chatId, message);
+}
+
+function parseReportArgs(args) {
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  const numRegex = /^\d+$/;
+  let fromDate = null, toDate = new Date(), selectedRepos = null, i = 0;
+  toDate.setHours(23, 59, 59, 999);
+
+  if (numRegex.test(args[0])) {
+    const days = parseInt(args[0]);
+    if (days < 1 || days > 365) return { error: "Duration must be between 1 and 365 days." };
+    fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() - days);
+    fromDate.setHours(0, 0, 0, 0);
+    i = 1;
+  } else if (dateRegex.test(args[0])) {
+    fromDate = new Date(args[0] + "T00:00:00Z");
+    if (isNaN(fromDate)) return { error: `Invalid date: ${args[0]}. Use YYYY-MM-DD.` };
+    i = 1;
+    if (args[1] && dateRegex.test(args[1])) {
+      toDate = new Date(args[1] + "T23:59:59Z");
+      if (isNaN(toDate)) return { error: `Invalid end date: ${args[1]}. Use YYYY-MM-DD.` };
+      if (toDate < fromDate) return { error: "End date must be after start date." };
+      i = 2;
+    } else {
+      toDate = new Date(args[0] + "T23:59:59Z");
+    }
+  } else {
+    return { error: `Invalid format. Send \`/report\` alone to see usage examples.` };
+  }
+
+  const symbolArgs = args.slice(i).map(s => s.toUpperCase());
+  if (symbolArgs.length > 0) {
+    const repoNames = [], unknown = [];
+    for (const sym of symbolArgs) {
+      if (SYMBOL_MAP[sym]) repoNames.push(SYMBOL_MAP[sym]);
+      else unknown.push(sym);
+    }
+    if (unknown.length > 0) {
+      return { error: `Unknown symbol(s): *${unknown.join(", ")}*\n\nValid: V10, V25, V50, V75, V75S, V100, V100L` };
+    }
+    selectedRepos = REPOS.filter(r => repoNames.includes(r.name));
+  }
+
+  return { fromDate, toDate, selectedRepos };
+}
+
+async function handleCustomReport(chatId, args) {
+  const parsed = parseReportArgs(args);
+  if (parsed.error) {
+    await sendTelegram(chatId, `❌ ${parsed.error}`);
+    return;
+  }
+
+  const { fromDate, toDate, selectedRepos } = parsed;
+  const repos = selectedRepos || REPOS;
+
+  const from = fromDate.toISOString().slice(0, 10);
+  const to = toDate.toISOString().slice(0, 10);
+  const symbolLabel = selectedRepos ? selectedRepos.map(r => r.symbol).join(", ") : "All Bots";
+  const title = `Custom Report — ${symbolLabel}`;
+
+  const message = await buildReport(repos, fromDate, toDate, title);
+  await sendTelegram(chatId, message);
+}
+
+async function handleReportUsage(chatId) {
+  await sendTelegram(chatId,
+    `📊 *Custom Report — Usage*\n\n` +
+    `*By duration (days):*\n` +
+    `\`/report 7\` — Last 7 days, all bots\n` +
+    `\`/report 30 V50\` — Last 30 days, Milk only\n` +
+    `\`/report 14 V75 V100\` — Last 14 days, two bots\n\n` +
+    `*By date range:*\n` +
+    `\`/report 2026-07-01\` — Single day\n` +
+    `\`/report 2026-07-01 2026-07-31\` — Full range\n` +
+    `\`/report 2026-07-01 2026-07-31 V75 V100\` — Range + filter\n\n` +
+    `*Valid symbols:*\n` +
+    `V10, V25, V50, V75, V75S, V100, V100L\n\n` +
+    `Omit symbol to include all bots.`
+  );
 }
 
 async function handleHelp(chatId) {
   await sendTelegram(chatId,
     `🤖 *Command Bot — Available Commands*\n\n` +
     `/status — All currently open trades\n` +
-    `/reportweekly — Weekly summary (all bots)\n` +
     `/reportdaily — Today's summary\n` +
-    `/reportmonthly — This month's summary\n` +
+    `/reportweekly — Last 7 days summary\n` +
+    `/reportmonthly — Last 30 days summary\n` +
+    `/report — Custom report (duration, date range, symbols)\n` +
     `/help — Show this message`
   );
 }
@@ -142,24 +250,29 @@ async function getUpdates() {
     if (!msg || !msg.text) { state.lastUpdateId = update.update_id; continue; }
 
     const chatId = String(msg.chat.id);
-    const text = msg.text.trim().toLowerCase();
+    const rawText = msg.text.trim();
+    const text = rawText.toLowerCase();
 
-    // Only respond to the authorised chat
     if (chatId !== String(ALLOWED_CHAT_ID)) {
       state.lastUpdateId = update.update_id;
       continue;
     }
 
-    console.log(`Command received: ${text}`);
+    console.log(`Command received: ${rawText}`);
 
     if (text === "/status") {
       await handleStatus(chatId);
-    } else if (text === "/reportweekly" || text === "/report" || text === "/report weekly") {
-      await handleReport(chatId, 7, "Weekly Report");
-    } else if (text === "/reportdaily" || text === "/report daily") {
+    } else if (text === "/reportdaily") {
       await handleReport(chatId, 1, "Daily Report");
-    } else if (text === "/reportmonthly" || text === "/report monthly") {
+    } else if (text === "/reportweekly") {
+      await handleReport(chatId, 7, "Weekly Report");
+    } else if (text === "/reportmonthly") {
       await handleReport(chatId, 30, "Monthly Report");
+    } else if (text === "/report") {
+      await handleReportUsage(chatId);
+    } else if (text.startsWith("/report ")) {
+      const args = rawText.slice(8).trim().split(/\s+/);
+      await handleCustomReport(chatId, args);
     } else if (text === "/help") {
       await handleHelp(chatId);
     }
