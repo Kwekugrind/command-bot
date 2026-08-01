@@ -1,17 +1,18 @@
 import fetch from "node-fetch";
+import WebSocket from "ws";
 import fs from "fs";
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const ALLOWED_CHAT_ID = process.env.TG_CHAT_ID;
 
 const REPOS = [
-  { name: "Test-Bot",      label: "Test Bot (V100 Live)", symbol: "V100L" },
-  { name: "Milk",          label: "Milk Machine (V50)",   symbol: "V50"   },
-  { name: "Lery-s-Alerts", label: "Lery's Elite (V75)",   symbol: "V75"   },
-  { name: "coffee",        label: "Coffee Machine (Step)", symbol: "V75S"  },
-  { name: "OmniSight",     label: "OmniSight (V100)",     symbol: "V100"  },
-  { name: "ice-cream",     label: "Ice Cream (V10)",      symbol: "V10"   },
-  { name: "Tea",           label: "Tea Machine (V25)",    symbol: "V25"   },
+  { name: "Test-Bot",      label: "Test Bot (V100 Live)", symbol: "V100L", derivSymbol: "R_100"  },
+  { name: "Milk",          label: "Milk Machine (V50)",   symbol: "V50",   derivSymbol: "R_50"   },
+  { name: "Lery-s-Alerts", label: "Lery's Elite (V75)",   symbol: "V75",   derivSymbol: "R_75"   },
+  { name: "coffee",        label: "Coffee Machine (Step)", symbol: "V75S",  derivSymbol: "1HZ75V" },
+  { name: "OmniSight",     label: "OmniSight (V100)",     symbol: "V100",  derivSymbol: "R_100"  },
+  { name: "ice-cream",     label: "Ice Cream (V10)",      symbol: "V10",   derivSymbol: "R_10"   },
+  { name: "Tea",           label: "Tea Machine (V25)",    symbol: "V25",   derivSymbol: "R_25"   },
 ];
 
 const SYMBOL_MAP = {
@@ -48,6 +49,29 @@ async function fetchTrades(repoName) {
   } catch { return []; }
 }
 
+async function fetchCurrentPrice(derivSymbol) {
+  return new Promise((resolve) => {
+    try {
+      const ws = new WebSocket("wss://ws.binaryws.com/websockets/v3?app_id=1089", { headers: { "Origin": "https://deriv.com" } });
+      const timeout = setTimeout(() => { ws.terminate(); resolve(null); }, 10000);
+      ws.on("open", () => ws.send(JSON.stringify({ ticks_history: derivSymbol, count: 1, end: "latest" })));
+      ws.on("message", (data) => {
+        const r = JSON.parse(data);
+        if (r.history && r.history.prices) { clearTimeout(timeout); resolve(parseFloat(r.history.prices[0])); ws.close(); }
+      });
+      ws.on("error", () => { clearTimeout(timeout); resolve(null); });
+    } catch { resolve(null); }
+  });
+}
+
+function formatDuration(mins) {
+  if (mins < 60) return `~${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  const hStr = `${h} hour${h !== 1 ? 's' : ''}`;
+  return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
+}
+
 async function handleStatus(chatId) {
   let message = `📡 *SYSTEM STATUS*\n_All Bots — Open Trades_\n\n`;
   let anyOpen = false;
@@ -60,10 +84,27 @@ async function handleStatus(chatId) {
       const openedAt = new Date(open.openTime.replace(" ", "T") + "Z");
       const durationMins = Math.round((Date.now() - openedAt.getTime()) / 60000);
       const dir = open.direction === "BUY" ? "🟢 BUY" : "🔴 SELL";
+
+      const currentPrice = await fetchCurrentPrice(repo.derivSymbol);
+      let pnlLine = "";
+      if (currentPrice !== null) {
+        const risk = open.direction === "BUY" ? open.entry - open.sl : open.sl - open.entry;
+        const SL_DOLLARS = 5;
+        const actualR = open.direction === "BUY"
+          ? (currentPrice - open.entry) / risk
+          : (open.entry - currentPrice) / risk;
+        const pnlDollars = parseFloat((actualR * SL_DOLLARS).toFixed(2));
+        const inProfit = pnlDollars >= 0;
+        const pnlStr = inProfit ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
+        const pnlIcon = inProfit ? "📈" : "📉";
+        pnlLine = `${pnlIcon} ${inProfit ? "Profit" : "Loss"}:  ${pnlStr}  (@ ${currentPrice.toFixed(4)})\n`;
+      }
+
       message += `*${repo.label}*\n`;
       message += `${dir}  |  Entry: \`${open.entry.toFixed(4)}\`\n`;
       message += `SL: \`${open.sl.toFixed(4)}\`  TP1: \`${open.tp1.toFixed(4)}\`\n`;
-      message += `⏱ Open ~${durationMins} min\n\n`;
+      message += pnlLine;
+      message += `⏱ ${formatDuration(durationMins)}\n\n`;
     }
   }
 
