@@ -7,14 +7,32 @@ const GH_TOKEN = process.env.GH_TOKEN;
 const GH_USER  = "Kwekugrind";
 
 const REPOS = [
-  { name: "Test-Bot",      label: "Test Bot (V10 Live)",    symbol: "V10",   derivSymbol: "R_10"    },
-  { name: "Milk",          label: "Milk Machine (V100)",    symbol: "V100",  derivSymbol: "R_100"   },
-  { name: "Lery-s-Alerts", label: "Lery's Elite (V75)",    symbol: "V75",   derivSymbol: "R_75"    },
-  { name: "coffee",        label: "Coffee Machine (Step)",  symbol: "V75S",  derivSymbol: "1HZ75V"  },
-  { name: "OmniSight",     label: "OmniSight (V50)",        symbol: "V50",   derivSymbol: "R_50"    },
-  { name: "ice-cream",     label: "Ice Cream (V100 1s)",    symbol: "V100S", derivSymbol: "1HZ100V" },
-  { name: "Tea",           label: "Tea Machine (V25)",      symbol: "V25",   derivSymbol: "R_25"    },
+  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   derivSymbol: "R_10"    },
+  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  derivSymbol: "R_100"   },
+  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   derivSymbol: "R_75"    },
+  { name: "coffee",         label: "Coffee Machine (V75S)", symbol: "V75S",  derivSymbol: "1HZ75V"  },
+  { name: "OmniSight",      label: "OmniSight (V50)",       symbol: "V50",   derivSymbol: "R_50"    },
+  { name: "ice-cream",      label: "Ice Cream (V100S)",     symbol: "V100S", derivSymbol: "1HZ100V" },
+  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   derivSymbol: "R_25"    },
 ];
+
+const REPORT_USAGE = `📖 *Report Command Usage*
+
+/report — Show this guide
+/report 7 — Last 7 days, all bots
+/report 30 V50 — Last 30 days, OmniSight only
+/report 2026-07-01 — Single day, all bots
+/report 2026-07-01 2026-07-31 — Date range, all bots
+/report 2026-07-01 2026-07-31 V75 V100 — Date range + symbol filter
+
+*Symbol codes:*
+V10 = Test Bot (R\\_10)
+V25 = Tea (R\\_25)
+V50 = OmniSight (R\\_50)
+V75 = Lery's Alerts (R\\_75)
+V75S = Coffee (1HZ75V)
+V100 = Milk (R\\_100)
+V100S = Ice Cream (1HZ100V)`;
 
 async function sendTelegram(message) {
   if (!TG_TOKEN || !TG_CHAT) return;
@@ -61,37 +79,27 @@ function formatDuration(mins) {
 }
 
 async function handleStatus() {
-  let message = `📊 *BOT STATUS REPORT*\n`;
-  message += `🕒 ${new Date().toUTCString()}\n\n`;
-
+  let message = `📊 *BOT STATUS REPORT*\n🕒 ${new Date().toUTCString()}\n\n`;
   for (const repo of REPOS) {
     const trades = await fetchTradesJson(repo.name);
     const open = trades.find(t => t.result === null);
     const closed = trades.filter(t => t.result !== null && t.result !== "CANCELLED");
     const wins = closed.filter(t => t.result === "WIN").length;
     const losses = closed.filter(t => t.result === "LOSS").length;
-
     message += `*${repo.label}*\n`;
-
     if (open) {
       const nowMins = Math.round((Date.now() - new Date(open.openTime).getTime()) / 60000);
-      const durationMins = isNaN(nowMins) ? 0 : nowMins;
       message += `🟡 OPEN: ${open.direction} @ ${open.entry?.toFixed(4) || "N/A"}\n`;
-
       const currentPrice = await fetchCurrentPrice(repo.derivSymbol);
       if (currentPrice !== null) {
         const risk = open.direction === "BUY" ? open.entry - open.sl : open.sl - open.entry;
-        const SL_DOLLARS = 5;
-        const actualR = open.direction === "BUY"
-          ? (currentPrice - open.entry) / risk
-          : (open.entry - currentPrice) / risk;
-        const pnlDollars = parseFloat((actualR * SL_DOLLARS).toFixed(2));
-        const inProfit = pnlDollars >= 0;
-        const pnlStr = inProfit ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
-        const pnlIcon = inProfit ? "📈" : "📉";
-        message += `${pnlIcon} ${inProfit ? "Profit" : "Loss"}:  ${pnlStr}  (@ ${currentPrice.toFixed(4)})\n`;
+        const actualR = open.direction === "BUY" ? (currentPrice - open.entry) / risk : (open.entry - currentPrice) / risk;
+        const pnlDollars = parseFloat((actualR * 5).toFixed(2));
+        const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
+        const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
+        message += `${pnlIcon} ${pnlDollars >= 0 ? "Profit" : "Loss"}:  ${pnlStr}  (@ ${currentPrice.toFixed(4)})\n`;
       }
-      message += `⏱ ${formatDuration(durationMins)}\n\n`;
+      message += `⏱ ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n\n`;
     } else {
       message += `⚪ No open trade\n`;
       if (closed.length > 0) message += `W: ${wins} | L: ${losses} | Total: ${closed.length}\n`;
@@ -105,7 +113,6 @@ async function handleSummary(daysBack, label) {
   let message = `📊 *${label} — ALL BOTS*\n🕒 ${new Date().toUTCString()}\n\n`;
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - daysBack);
-
   for (const repo of REPOS) {
     const trades = await fetchTradesJson(repo.name);
     const pt = trades.filter(t => t.result && t.result !== "CANCELLED" && new Date(t.closeTime) >= cutoff);
@@ -116,6 +123,92 @@ async function handleSummary(daysBack, label) {
     const wr = ((wins / pt.length) * 100).toFixed(1);
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: ${netR.toFixed(1)}R\n\n`;
   }
+  await sendTelegram(message);
+}
+
+function parseReportArgs(args) {
+  // args is an array of tokens after /report
+  // Returns { fromDate, toDate, symbols }
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
+
+  let fromDate = null, toDate = null, symbols = [];
+  const dates = [], syms = [];
+
+  for (const token of args) {
+    if (dateRegex.test(token)) dates.push(token);
+    else if (symbolCodes.includes(token.toLowerCase())) syms.push(token.toUpperCase());
+    else if (/^\d+$/.test(token) && !fromDate) {
+      // plain number = last N days
+      const d = new Date();
+      d.setDate(d.getDate() - parseInt(token));
+      fromDate = d.toISOString().slice(0, 10);
+      toDate = new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  if (dates.length === 1) { fromDate = dates[0]; toDate = dates[0]; }
+  else if (dates.length >= 2) { fromDate = dates[0]; toDate = dates[1]; }
+
+  symbols = syms;
+  return { fromDate, toDate, symbols };
+}
+
+async function handleReport(args) {
+  if (args.length === 0) { await sendTelegram(REPORT_USAGE); return; }
+
+  const { fromDate, toDate, symbols } = parseReportArgs(args);
+
+  if (!fromDate) { await sendTelegram(`❓ Couldn't parse that.\n\n${REPORT_USAGE}`); return; }
+
+  const from = new Date(fromDate + "T00:00:00Z");
+  const to   = new Date(toDate   + "T23:59:59Z");
+  const isSingleDay = fromDate === toDate;
+
+  const filteredRepos = symbols.length > 0
+    ? REPOS.filter(r => symbols.includes(r.symbol))
+    : REPOS;
+
+  const rangeLabel = isSingleDay
+    ? fromDate
+    : `${fromDate} → ${toDate}`;
+  const symbolLabel = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
+
+  let message = `📊 *Report: ${rangeLabel}${symbolLabel}*\n\n`;
+  let grandWins = 0, grandLosses = 0, grandR = 0, grandTotal = 0;
+
+  for (const repo of filteredRepos) {
+    const trades = await fetchTradesJson(repo.name);
+    const pt = trades.filter(t => {
+      if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
+      const closeDate = new Date(t.closeTime);
+      return closeDate >= from && closeDate <= to;
+    });
+
+    if (pt.length === 0) { message += `*${repo.label}*\nNo trades in this period.\n\n`; continue; }
+
+    const wins = pt.filter(t => t.result === "WIN").length;
+    const losses = pt.filter(t => t.result === "LOSS").length;
+    const netR = pt.reduce((s, t) => s + (t.result === "WIN" ? (t.rr || 1.5) : -1), 0);
+    const wr = ((wins / pt.length) * 100).toFixed(1);
+    const netDollars = parseFloat((netR * 5).toFixed(2));
+    const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
+
+    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: ${netR.toFixed(1)}R (${netStr})\n\n`;
+
+    grandWins   += wins;
+    grandLosses += losses;
+    grandR      += netR;
+    grandTotal  += pt.length;
+  }
+
+  if (filteredRepos.length > 1 && grandTotal > 0) {
+    const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
+    const grandDollars = parseFloat((grandR * 5).toFixed(2));
+    const grandStr = grandDollars >= 0 ? `+$${grandDollars.toFixed(2)}` : `-$${Math.abs(grandDollars).toFixed(2)}`;
+    message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL — All Bots*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet: ${grandR.toFixed(1)}R (${grandStr})`;
+  }
+
   await sendTelegram(message);
 }
 
@@ -133,14 +226,25 @@ async function main() {
       const updates = await getUpdates(offset);
       for (const update of updates) {
         offset = update.update_id + 1;
-        const text = update.message?.text?.trim().toLowerCase();
-        if (!text) continue;
-        console.log(`💬 Command: ${text}`);
-        if (text === "/status" || text === "/s")      await handleStatus();
-        else if (text === "/daily"  || text === "/d") await handleSummary(1, "Daily Summary");
-        else if (text === "/weekly" || text === "/w") await handleSummary(7, "Weekly Summary");
-        else if (text === "/monthly"|| text === "/m") await handleSummary(30, "Monthly Summary");
-        else await sendTelegram(`❓ Unknown command: ${text}\n\nAvailable:\n/status or /s\n/daily or /d\n/weekly or /w\n/monthly or /m`);
+        const raw = update.message?.text?.trim() || "";
+        if (!raw) continue;
+        const lower = raw.toLowerCase();
+        console.log(`💬 Command: ${raw}`);
+
+        if (lower === "/status" || lower === "/s") {
+          await handleStatus();
+        } else if (lower === "/daily" || lower === "/d") {
+          await handleSummary(1, "Daily Summary");
+        } else if (lower === "/weekly" || lower === "/w") {
+          await handleSummary(7, "Weekly Summary");
+        } else if (lower === "/monthly" || lower === "/m") {
+          await handleSummary(30, "Monthly Summary");
+        } else if (lower.startsWith("/report")) {
+          const args = raw.slice("/report".length).trim().split(/\s+/).filter(Boolean);
+          await handleReport(args);
+        } else {
+          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable commands:\n/status or /s — Live status\n/daily or /d — Today's summary\n/weekly or /w — Last 7 days\n/monthly or /m — Last 30 days\n/report — Custom report (send /report for guide)`);
+        }
       }
     } catch (err) { console.error("Poll error:", err.message); await new Promise(r => setTimeout(r, 5000)); }
   }
