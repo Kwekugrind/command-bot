@@ -18,12 +18,20 @@ const REPOS = [
 
 const REPORT_USAGE = `📖 *Report Command Usage*
 
-/report — Show this guide
+*By number of days:*
 /report 7 — Last 7 days, all bots
-/report 30 V50 — Last 30 days, OmniSight only
-/report 2026-07-01 — Single day, all bots
-/report 2026-07-01 2026-07-31 — Date range, all bots
-/report 2026-07-01 2026-07-31 V75 V100 — Date range + symbol filter
+/report 7 V10 — Last 7 days, Test Bot only
+/report 7 V10 V50 — Last 7 days, Test Bot + OmniSight
+/report 30 — Last 30 days, all bots
+/report 30 V100 — Last 30 days, Milk only
+
+*By single date:*
+/report 2026-07-01 — That day, all bots
+/report 2026-07-01 V75 — That day, Lery's only
+
+*By date range:*
+/report 2026-07-01 2026-07-31 — Full range, all bots
+/report 2026-07-01 2026-07-31 V75 V100 — Full range, specific bots
 
 *Symbol codes:*
 V10 = Test Bot (R\\_10)
@@ -32,7 +40,9 @@ V50 = OmniSight (R\\_50)
 V75 = Lery's Alerts (R\\_75)
 V75S = Coffee (1HZ75V)
 V100 = Milk (R\\_100)
-V100S = Ice Cream (1HZ100V)`;
+V100S = Ice Cream (1HZ100V)
+
+💡 You can combine any number of symbols. Separate with spaces.`;
 
 async function sendTelegram(message) {
   if (!TG_TOKEN || !TG_CHAT) return;
@@ -127,56 +137,37 @@ async function handleSummary(daysBack, label) {
 }
 
 function parseReportArgs(args) {
-  // args is an array of tokens after /report
-  // Returns { fromDate, toDate, symbols }
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
   const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
-
-  let fromDate = null, toDate = null, symbols = [];
+  let fromDate = null, toDate = null;
   const dates = [], syms = [];
-
   for (const token of args) {
     if (dateRegex.test(token)) dates.push(token);
     else if (symbolCodes.includes(token.toLowerCase())) syms.push(token.toUpperCase());
     else if (/^\d+$/.test(token) && !fromDate) {
-      // plain number = last N days
       const d = new Date();
       d.setDate(d.getDate() - parseInt(token));
       fromDate = d.toISOString().slice(0, 10);
       toDate = new Date().toISOString().slice(0, 10);
     }
   }
-
   if (dates.length === 1) { fromDate = dates[0]; toDate = dates[0]; }
   else if (dates.length >= 2) { fromDate = dates[0]; toDate = dates[1]; }
-
-  symbols = syms;
-  return { fromDate, toDate, symbols };
+  return { fromDate, toDate, symbols: syms };
 }
 
 async function handleReport(args) {
   if (args.length === 0) { await sendTelegram(REPORT_USAGE); return; }
-
   const { fromDate, toDate, symbols } = parseReportArgs(args);
-
   if (!fromDate) { await sendTelegram(`❓ Couldn't parse that.\n\n${REPORT_USAGE}`); return; }
-
   const from = new Date(fromDate + "T00:00:00Z");
   const to   = new Date(toDate   + "T23:59:59Z");
   const isSingleDay = fromDate === toDate;
-
-  const filteredRepos = symbols.length > 0
-    ? REPOS.filter(r => symbols.includes(r.symbol))
-    : REPOS;
-
-  const rangeLabel = isSingleDay
-    ? fromDate
-    : `${fromDate} → ${toDate}`;
+  const filteredRepos = symbols.length > 0 ? REPOS.filter(r => symbols.includes(r.symbol)) : REPOS;
+  const rangeLabel = isSingleDay ? fromDate : `${fromDate} → ${toDate}`;
   const symbolLabel = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
-
   let message = `📊 *Report: ${rangeLabel}${symbolLabel}*\n\n`;
   let grandWins = 0, grandLosses = 0, grandR = 0, grandTotal = 0;
-
   for (const repo of filteredRepos) {
     const trades = await fetchTradesJson(repo.name);
     const pt = trades.filter(t => {
@@ -184,31 +175,22 @@ async function handleReport(args) {
       const closeDate = new Date(t.closeTime);
       return closeDate >= from && closeDate <= to;
     });
-
     if (pt.length === 0) { message += `*${repo.label}*\nNo trades in this period.\n\n`; continue; }
-
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
     const netR = pt.reduce((s, t) => s + (t.result === "WIN" ? (t.rr || 1.5) : -1), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netDollars = parseFloat((netR * 5).toFixed(2));
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
-
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: ${netR.toFixed(1)}R (${netStr})\n\n`;
-
-    grandWins   += wins;
-    grandLosses += losses;
-    grandR      += netR;
-    grandTotal  += pt.length;
+    grandWins += wins; grandLosses += losses; grandR += netR; grandTotal += pt.length;
   }
-
   if (filteredRepos.length > 1 && grandTotal > 0) {
     const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandDollars = parseFloat((grandR * 5).toFixed(2));
     const grandStr = grandDollars >= 0 ? `+$${grandDollars.toFixed(2)}` : `-$${Math.abs(grandDollars).toFixed(2)}`;
     message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL — All Bots*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet: ${grandR.toFixed(1)}R (${grandStr})`;
   }
-
   await sendTelegram(message);
 }
 
@@ -230,20 +212,15 @@ async function main() {
         if (!raw) continue;
         const lower = raw.toLowerCase();
         console.log(`💬 Command: ${raw}`);
-
-        if (lower === "/status" || lower === "/s") {
-          await handleStatus();
-        } else if (lower === "/daily" || lower === "/d") {
-          await handleSummary(1, "Daily Summary");
-        } else if (lower === "/weekly" || lower === "/w") {
-          await handleSummary(7, "Weekly Summary");
-        } else if (lower === "/monthly" || lower === "/m") {
-          await handleSummary(30, "Monthly Summary");
-        } else if (lower.startsWith("/report")) {
+        if (lower === "/status")       await handleStatus();
+        else if (lower === "/daily")   await handleSummary(1,  "Daily Summary");
+        else if (lower === "/weekly")  await handleSummary(7,  "Weekly Summary");
+        else if (lower === "/monthly") await handleSummary(30, "Monthly Summary");
+        else if (lower.startsWith("/report")) {
           const args = raw.slice("/report".length).trim().split(/\s+/).filter(Boolean);
           await handleReport(args);
         } else {
-          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable commands:\n/status or /s — Live status\n/daily or /d — Today's summary\n/weekly or /w — Last 7 days\n/monthly or /m — Last 30 days\n/report — Custom report (send /report for guide)`);
+          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable:\n/status — Live status, all bots\n/daily — Today's summary\n/weekly — Last 7 days\n/monthly — Last 30 days\n/report — Custom report (send /report for guide)`);
         }
       }
     } catch (err) { console.error("Poll error:", err.message); await new Promise(r => setTimeout(r, 5000)); }
