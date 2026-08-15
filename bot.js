@@ -194,6 +194,109 @@ async function handleReport(args) {
   await sendTelegram(message);
 }
 
+const PHASE_LABELS = {
+  PHASE_A: "Phase A — Fresh H1 Cross",
+  PHASE_B: "Phase B — Stateful Pullback",
+  PHASE_C: "Phase C — HTF Realignment",
+  PHASE_D: "Phase D — Shallow Pullback",
+};
+
+function phaseStats(trades, phase) {
+  const pt = phase === "UNKNOWN"
+    ? trades.filter(t => !t.entryType || !PHASE_LABELS[t.entryType])
+    : trades.filter(t => t.entryType === phase);
+  if (pt.length === 0) return null;
+  const wins   = pt.filter(t => t.result === "WIN").length;
+  const losses = pt.filter(t => t.result === "LOSS").length;
+  const netR   = pt.reduce((s, t) => s + (t.result === "WIN" ? (t.rr || 1.5) : -1), 0);
+  const wr     = ((wins / pt.length) * 100).toFixed(1);
+  const net$   = parseFloat((netR * 5).toFixed(2));
+  return { count: pt.length, wins, losses, wr, netR, net$ };
+}
+
+async function handlePerformance(args) {
+  // Optional arg: number of days (default = all-time)
+  let cutoff = null;
+  let cutoffLabel = "All-Time";
+  if (args.length > 0 && /^\d+$/.test(args[0])) {
+    const days = parseInt(args[0]);
+    cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    cutoffLabel = `Last ${days} Days`;
+  }
+
+  // Phase accumulators across all bots
+  const allPhases = ["PHASE_A", "PHASE_B", "PHASE_C", "PHASE_D", "UNKNOWN"];
+  const grandStats = {};
+  allPhases.forEach(p => { grandStats[p] = { count: 0, wins: 0, losses: 0, netR: 0 }; });
+
+  let message = `🔬 *Phase Performance Report — ${cutoffLabel}*\n🕒 ${new Date().toUTCString()}\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n`;
+
+  for (const repo of REPOS) {
+    const allTrades = await fetchTradesJson(repo.name);
+    const closed = allTrades.filter(t => {
+      if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
+      if (cutoff && new Date(t.closeTime) < cutoff) return false;
+      return true;
+    });
+    if (closed.length === 0) continue;
+
+    message += `\n*${repo.label}*\n`;
+    let hasAny = false;
+    for (const phase of allPhases) {
+      const s = phaseStats(closed, phase);
+      if (!s) continue;
+      hasAny = true;
+      const label = phase === "UNKNOWN" ? "🔘 Legacy / Unknown" : `${["🅰️","🅱️","🆑","🇩",""][allPhases.indexOf(phase)]} ${PHASE_LABELS[phase]}`;
+      const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$).toFixed(2)}`;
+      const icon   = s.wr >= 60 ? "🟢" : s.wr >= 45 ? "🟡" : "🔴";
+      message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net:${s.netR.toFixed(1)}R (${netStr})\n`;
+      // Accumulate into grand totals
+      grandStats[phase].count  += s.count;
+      grandStats[phase].wins   += s.wins;
+      grandStats[phase].losses += s.losses;
+      grandStats[phase].netR   += s.netR;
+    }
+    if (!hasAny) message += `  No closed trades in period.\n`;
+  }
+
+  // Grand totals section across all bots
+  message += `\n━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED — All Bots*\n`;
+  let anyGrand = false;
+  for (const phase of allPhases) {
+    const g = grandStats[phase];
+    if (g.count === 0) continue;
+    anyGrand = true;
+    const wr     = ((g.wins / g.count) * 100).toFixed(1);
+    const net$   = parseFloat((g.netR * 5).toFixed(2));
+    const netStr = net$ >= 0 ? `+$${net$.toFixed(2)}` : `-$${Math.abs(net$).toFixed(2)}`;
+    const icon   = wr >= 60 ? "🟢" : wr >= 45 ? "🟡" : "🔴";
+    const label  = phase === "UNKNOWN" ? "Legacy/Unknown" : PHASE_LABELS[phase];
+    message += `${icon} ${label}: ${g.count} trades | WR:${wr}% | Net:${g.netR.toFixed(1)}R (${netStr})\n`;
+  }
+  if (!anyGrand) message += `No closed trades found.\n`;
+
+  // Best & worst phase callout
+  const ranked = allPhases
+    .filter(p => grandStats[p].count > 0)
+    .map(p => ({
+      phase: p,
+      wr: grandStats[p].count > 0 ? (grandStats[p].wins / grandStats[p].count) * 100 : 0,
+      netR: grandStats[p].netR
+    }))
+    .sort((a, b) => b.netR - a.netR);
+
+  if (ranked.length >= 2) {
+    const best  = ranked[0];
+    const worst = ranked[ranked.length - 1];
+    message += `\n🏆 *Best:* ${PHASE_LABELS[best.phase] || "Legacy"} (WR:${best.wr.toFixed(1)}% | Net:${best.netR.toFixed(1)}R)\n`;
+    message += `⚠️ *Worst:* ${PHASE_LABELS[worst.phase] || "Legacy"} (WR:${worst.wr.toFixed(1)}% | Net:${worst.netR.toFixed(1)}R)\n`;
+  }
+
+  await sendTelegram(message);
+}
+
 async function getUpdates(offset) {
   const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
   const data = await res.json();
@@ -219,8 +322,12 @@ async function main() {
         else if (lower.startsWith("/report")) {
           const args = raw.slice("/report".length).trim().split(/\s+/).filter(Boolean);
           await handleReport(args);
+        } else if (lower.startsWith("/performance") || lower.startsWith("/perf")) {
+          const cmd = lower.startsWith("/performance") ? "/performance" : "/perf";
+          const args = raw.slice(cmd.length).trim().split(/\s+/).filter(Boolean);
+          await handlePerformance(args);
         } else {
-          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable:\n/status — Live status, all bots\n/daily — Today's summary\n/weekly — Last 7 days\n/monthly — Last 30 days\n/report — Custom report (send /report for guide)`);
+          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable:\n/status — Live status, all bots\n/daily — Today's summary\n/weekly — Last 7 days\n/monthly — Last 30 days\n/report — Custom report (send /report for guide)\n/performance [days] — Phase A/B/C/D win rates across all bots\n/perf [days] — Alias for /performance`);
         }
       }
     } catch (err) { console.error("Poll error:", err.message); await new Promise(r => setTimeout(r, 5000)); }
