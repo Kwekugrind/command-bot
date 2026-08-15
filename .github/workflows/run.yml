@@ -26,6 +26,7 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }} # <--- FIXED: Passes GitHub token so private repos can be read successfully!
         run: node bot.js
       - name: Save state
         run: |
