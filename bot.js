@@ -6,15 +6,24 @@ const TG_CHAT  = process.env.TG_CHAT_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const GH_USER  = "Kwekugrind";
 
+// Multipliers and commissions matched to individual bot repositories
 const REPOS = [
-  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   derivSymbol: "R_10"    },
-  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  derivSymbol: "R_100"   },
-  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   derivSymbol: "R_75"    },
-  { name: "coffee",         label: "Coffee Machine (V75S)", symbol: "V75S",  derivSymbol: "1HZ75V"  },
-  { name: "OmniSight",      label: "OmniSight (V50)",       symbol: "V50",   derivSymbol: "R_50"    },
-  { name: "ice-cream",      label: "Ice Cream (V100S)",     symbol: "V100S", derivSymbol: "1HZ100V" },
-  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   derivSymbol: "R_25"    },
+  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
+  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
+  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
+  { name: "coffee",         label: "Coffee Machine (V75S)", symbol: "V75S",  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
+  { name: "OmniSight",      label: "OmniSight (V50)",       symbol: "V50",   derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
+  { name: "ice-cream",      label: "Ice Cream (V100S)",     symbol: "V100S", derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
+  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
 ];
+
+const PHASE_LABELS = {
+  PHASE_A: "Phase A — Fresh H1 Cross",
+  PHASE_B: "Phase B — Stateful Pullback",
+  PHASE_B_NO_PRIOR_A: "Phase B — Window Expired Fallback",
+  PHASE_C: "Phase C — HTF Realignment",
+  PHASE_D: "Phase D — Shallow Pullback",
+};
 
 const REPORT_USAGE = `📖 *Report Command Usage*
 
@@ -34,29 +43,52 @@ const REPORT_USAGE = `📖 *Report Command Usage*
 /report 2026-07-01 2026-07-31 V75 V100 — Full range, specific bots
 
 *Symbol codes:*
-V10 = Test Bot (R\\_10)
-V25 = Tea (R\\_25)
-V50 = OmniSight (R\\_50)
-V75 = Lery's Alerts (R\\_75)
+V10 = Test Bot (R_10)
+V25 = Tea (R_25)
+V50 = OmniSight (R_50)
+V75 = Lery's Alerts (R_75)
 V75S = Coffee (1HZ75V)
-V100 = Milk (R\\_100)
+V100 = Milk (R_100)
 V100S = Ice Cream (1HZ100V)
 
 💡 You can combine any number of symbols. Separate with spaces.`;
 
-async function sendTelegram(message) {
-  if (!TG_TOKEN || !TG_CHAT) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: TG_CHAT, text: message, parse_mode: "Markdown" })
-    });
-  } catch (err) { console.error("Telegram error:", err.message); }
+// Helper to safely parse UTC date strings from trades.json ("YYYY-MM-DD HH:MM:SS")
+function parseUtcDate(dateStr) {
+  if (!dateStr) return null;
+  const isoStr = dateStr.includes("T") ? dateStr : dateStr.replace(" ", "T") + "Z";
+  const d = new Date(isoStr);
+  return isNaN(d.getTime()) ? new Date(dateStr) : d;
 }
 
+// Resilient Telegram Sender with Markdown Error Fallback
+async function sendTelegram(message) {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  const send = async (text, parseMode) => {
+    const body = { chat_id: TG_CHAT, text };
+    if (parseMode) body.parse_mode = parseMode;
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    return await res.json();
+  };
+
+  try {
+    const data = await send(message, "Markdown");
+    if (!data.ok) {
+      const plain = message.replace(/[*_`\[\]]/g, "");
+      await send(plain, "");
+    }
+  } catch (err) {
+    console.error("Telegram error:", err.message);
+  }
+}
+
+// Fetch trades.json bypassing Cloudflare CDN cache
 async function fetchTradesJson(repoName) {
-  const url = `https://raw.githubusercontent.com/${GH_USER}/${repoName}/main/trades.json`;
+  const url = `https://raw.githubusercontent.com/${GH_USER}/${repoName}/main/trades.json?t=${Date.now()}`;
   try {
     const headers = GH_TOKEN ? { "Authorization": `Bearer ${GH_TOKEN}` } : {};
     const res = await fetch(url, { headers });
@@ -73,7 +105,11 @@ async function fetchCurrentPrice(derivSymbol) {
       ws.on("open", () => ws.send(JSON.stringify({ ticks_history: derivSymbol, count: 1, end: "latest" })));
       ws.on("message", (data) => {
         const r = JSON.parse(data);
-        if (r.history && r.history.prices) { clearTimeout(timeout); resolve(parseFloat(r.history.prices[0])); ws.close(); }
+        if (r.history && r.history.prices) { 
+          clearTimeout(timeout); 
+          resolve(parseFloat(r.history.prices[r.history.prices.length - 1])); 
+          ws.close(); 
+        }
       });
       ws.on("error", () => { clearTimeout(timeout); resolve(null); });
     } catch { resolve(null); }
@@ -88,26 +124,32 @@ function formatDuration(mins) {
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
+// ── 1. STATUS HANDLER ──
 async function handleStatus() {
   let message = `📊 *BOT STATUS REPORT*\n🕒 ${new Date().toUTCString()}\n\n`;
   for (const repo of REPOS) {
     const trades = await fetchTradesJson(repo.name);
-    const open = trades.find(t => t.result === null);
+    const open = trades.find(t => t.result === null && !t.pending);
     const closed = trades.filter(t => t.result !== null && t.result !== "CANCELLED");
     const wins = closed.filter(t => t.result === "WIN").length;
     const losses = closed.filter(t => t.result === "LOSS").length;
+    
     message += `*${repo.label}*\n`;
     if (open) {
-      const nowMins = Math.round((Date.now() - new Date(open.openTime).getTime()) / 60000);
+      const openDate = parseUtcDate(open.openTime);
+      const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
       message += `🟡 OPEN: ${open.direction} @ ${open.entry?.toFixed(4) || "N/A"}\n`;
+      
       const currentPrice = await fetchCurrentPrice(repo.derivSymbol);
-      if (currentPrice !== null) {
-        const risk = open.direction === "BUY" ? open.entry - open.sl : open.sl - open.entry;
-        const actualR = open.direction === "BUY" ? (currentPrice - open.entry) / risk : (open.entry - currentPrice) / risk;
-        const pnlDollars = parseFloat((actualR * 5).toFixed(2));
+      if (currentPrice !== null && open.entry) {
+        // True Deriv Multiplier P&L calculation ($5 stake)
+        const rawPnl = open.direction === "BUY"
+          ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
+          : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
+        const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
         const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
         const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
-        message += `${pnlIcon} ${pnlDollars >= 0 ? "Profit" : "Loss"}:  ${pnlStr}  (@ ${currentPrice.toFixed(4)})\n`;
+        message += `${pnlIcon} P&L: ${pnlStr} (@ ${currentPrice.toFixed(4)})\n`;
       }
       message += `⏱ ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n\n`;
     } else {
@@ -119,28 +161,49 @@ async function handleStatus() {
   await sendTelegram(message);
 }
 
+// ── 2. SUMMARY HANDLER (/daily, /weekly, /monthly) ──
 async function handleSummary(daysBack, label) {
   let message = `📊 *${label} — ALL BOTS*\n🕒 ${new Date().toUTCString()}\n\n`;
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - daysBack);
+  if (daysBack === 1) {
+    // For Daily: Set cutoff to 00:00:00 UTC today
+    cutoff.setUTCHours(0, 0, 0, 0);
+  } else {
+    cutoff.setDate(cutoff.getDate() - daysBack);
+  }
+
   for (const repo of REPOS) {
     const trades = await fetchTradesJson(repo.name);
-    const pt = trades.filter(t => t.result && t.result !== "CANCELLED" && new Date(t.closeTime) >= cutoff);
-    if (pt.length === 0) { message += `*${repo.label}*\nNo trades in period.\n\n`; continue; }
+    const pt = trades.filter(t => {
+      if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
+      const closeDate = parseUtcDate(t.closeTime);
+      return closeDate && closeDate >= cutoff;
+    });
+
+    if (pt.length === 0) { 
+      message += `*${repo.label}*\nNo trades in period.\n\n`; 
+      continue; 
+    }
+
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
-    const netR = pt.reduce((s, t) => s + (t.result === "WIN" ? t.rr : -1), 0);
+    const netR = pt.reduce((s, t) => s + (t.result === "WIN" ? (t.rr || 1.5) : -1), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
-    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: ${netR.toFixed(1)}R\n\n`;
+    const netDollars = parseFloat((netR * 5).toFixed(2));
+    const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
+
+    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: ${netR.toFixed(1)}R (${netStr})\n\n`;
   }
   await sendTelegram(message);
 }
 
+// ── 3. REPORT PARSER & HANDLER ──
 function parseReportArgs(args) {
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
   const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
   let fromDate = null, toDate = null;
   const dates = [], syms = [];
+  
   for (const token of args) {
     if (dateRegex.test(token)) dates.push(token);
     else if (symbolCodes.includes(token.toLowerCase())) syms.push(token.toUpperCase());
@@ -160,31 +223,38 @@ async function handleReport(args) {
   if (args.length === 0) { await sendTelegram(REPORT_USAGE); return; }
   const { fromDate, toDate, symbols } = parseReportArgs(args);
   if (!fromDate) { await sendTelegram(`❓ Couldn't parse that.\n\n${REPORT_USAGE}`); return; }
+
   const from = new Date(fromDate + "T00:00:00Z");
   const to   = new Date(toDate   + "T23:59:59Z");
   const isSingleDay = fromDate === toDate;
   const filteredRepos = symbols.length > 0 ? REPOS.filter(r => symbols.includes(r.symbol)) : REPOS;
   const rangeLabel = isSingleDay ? fromDate : `${fromDate} → ${toDate}`;
   const symbolLabel = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
+  
   let message = `📊 *Report: ${rangeLabel}${symbolLabel}*\n\n`;
   let grandWins = 0, grandLosses = 0, grandR = 0, grandTotal = 0;
+
   for (const repo of filteredRepos) {
     const trades = await fetchTradesJson(repo.name);
     const pt = trades.filter(t => {
       if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
-      const closeDate = new Date(t.closeTime);
-      return closeDate >= from && closeDate <= to;
+      const closeDate = parseUtcDate(t.closeTime);
+      return closeDate && closeDate >= from && closeDate <= to;
     });
+
     if (pt.length === 0) { message += `*${repo.label}*\nNo trades in this period.\n\n`; continue; }
+    
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
     const netR = pt.reduce((s, t) => s + (t.result === "WIN" ? (t.rr || 1.5) : -1), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netDollars = parseFloat((netR * 5).toFixed(2));
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
+    
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: ${netR.toFixed(1)}R (${netStr})\n\n`;
     grandWins += wins; grandLosses += losses; grandR += netR; grandTotal += pt.length;
   }
+
   if (filteredRepos.length > 1 && grandTotal > 0) {
     const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandDollars = parseFloat((grandR * 5).toFixed(2));
@@ -194,13 +264,7 @@ async function handleReport(args) {
   await sendTelegram(message);
 }
 
-const PHASE_LABELS = {
-  PHASE_A: "Phase A — Fresh H1 Cross",
-  PHASE_B: "Phase B — Stateful Pullback",
-  PHASE_C: "Phase C — HTF Realignment",
-  PHASE_D: "Phase D — Shallow Pullback",
-};
-
+// ── 4. PHASE PERFORMANCE HANDLER (/performance, /perf) ──
 function phaseStats(trades, phase) {
   const pt = phase === "UNKNOWN"
     ? trades.filter(t => !t.entryType || !PHASE_LABELS[t.entryType])
@@ -215,7 +279,6 @@ function phaseStats(trades, phase) {
 }
 
 async function handlePerformance(args) {
-  // Optional arg: number of days (default = all-time)
   let cutoff = null;
   let cutoffLabel = "All-Time";
   if (args.length > 0 && /^\d+$/.test(args[0])) {
@@ -225,8 +288,7 @@ async function handlePerformance(args) {
     cutoffLabel = `Last ${days} Days`;
   }
 
-  // Phase accumulators across all bots
-  const allPhases = ["PHASE_A", "PHASE_B", "PHASE_C", "PHASE_D", "UNKNOWN"];
+  const allPhases = ["PHASE_A", "PHASE_B", "PHASE_B_NO_PRIOR_A", "PHASE_C", "PHASE_D", "UNKNOWN"];
   const grandStats = {};
   allPhases.forEach(p => { grandStats[p] = { count: 0, wins: 0, losses: 0, netR: 0 }; });
 
@@ -237,8 +299,8 @@ async function handlePerformance(args) {
     const allTrades = await fetchTradesJson(repo.name);
     const closed = allTrades.filter(t => {
       if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
-      if (cutoff && new Date(t.closeTime) < cutoff) return false;
-      return true;
+      const closeDate = parseUtcDate(t.closeTime);
+      return !cutoff || (closeDate && closeDate >= cutoff);
     });
     if (closed.length === 0) continue;
 
@@ -248,11 +310,13 @@ async function handlePerformance(args) {
       const s = phaseStats(closed, phase);
       if (!s) continue;
       hasAny = true;
-      const label = phase === "UNKNOWN" ? "🔘 Legacy / Unknown" : `${["🅰️","🅱️","🆑","🇩",""][allPhases.indexOf(phase)]} ${PHASE_LABELS[phase]}`;
+      const label = phase === "UNKNOWN" 
+        ? "🔘 Legacy / Unknown" 
+        : `${["🅰️","🅱️","🔄","🆑","🇩",""][allPhases.indexOf(phase)]} ${PHASE_LABELS[phase]}`;
       const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$).toFixed(2)}`;
       const icon   = s.wr >= 60 ? "🟢" : s.wr >= 45 ? "🟡" : "🔴";
       message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net:${s.netR.toFixed(1)}R (${netStr})\n`;
-      // Accumulate into grand totals
+      
       grandStats[phase].count  += s.count;
       grandStats[phase].wins   += s.wins;
       grandStats[phase].losses += s.losses;
@@ -261,7 +325,6 @@ async function handlePerformance(args) {
     if (!hasAny) message += `  No closed trades in period.\n`;
   }
 
-  // Grand totals section across all bots
   message += `\n━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED — All Bots*\n`;
   let anyGrand = false;
   for (const phase of allPhases) {
@@ -277,7 +340,6 @@ async function handlePerformance(args) {
   }
   if (!anyGrand) message += `No closed trades found.\n`;
 
-  // Best & worst phase callout
   const ranked = allPhases
     .filter(p => grandStats[p].count > 0)
     .map(p => ({
@@ -297,14 +359,17 @@ async function handlePerformance(args) {
   await sendTelegram(message);
 }
 
+// ── 5. POLLING & MAIN LOOP ──
 async function getUpdates(offset) {
-  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
-  const data = await res.json();
-  return data.ok ? data.result : [];
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
+    const data = await res.json();
+    return data.ok ? data.result : [];
+  } catch { return []; }
 }
 
 async function main() {
-  console.log("🤖 Command bot started...");
+  console.log("🤖 Command Center bot started...");
   let offset = 0;
   while (true) {
     try {
@@ -314,11 +379,12 @@ async function main() {
         const raw = update.message?.text?.trim() || "";
         if (!raw) continue;
         const lower = raw.toLowerCase();
-        console.log(`💬 Command: ${raw}`);
+        console.log(`💬 Command received: ${raw}`);
+
         if (lower === "/status")       await handleStatus();
-        else if (lower === "/daily")   await handleSummary(1,  "Daily Summary");
-        else if (lower === "/weekly")  await handleSummary(7,  "Weekly Summary");
-        else if (lower === "/monthly") await handleSummary(30, "Monthly Summary");
+        else if (lower === "/daily")   await handleSummary(1,  "Daily Summary (Today)");
+        else if (lower === "/weekly")  await handleSummary(7,  "Weekly Summary (Last 7 Days)");
+        else if (lower === "/monthly") await handleSummary(30, "Monthly Summary (Last 30 Days)");
         else if (lower.startsWith("/report")) {
           const args = raw.slice("/report".length).trim().split(/\s+/).filter(Boolean);
           await handleReport(args);
@@ -327,10 +393,13 @@ async function main() {
           const args = raw.slice(cmd.length).trim().split(/\s+/).filter(Boolean);
           await handlePerformance(args);
         } else {
-          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable:\n/status — Live status, all bots\n/daily — Today's summary\n/weekly — Last 7 days\n/monthly — Last 30 days\n/report — Custom report (send /report for guide)\n/performance [days] — Phase A/B/C/D win rates across all bots\n/perf [days] — Alias for /performance`);
+          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable Commands:\n/status — Live status across all bots\n/daily — Today's closed trades\n/weekly — Last 7 days summary\n/monthly — Last 30 days summary\n/report — Custom date/symbol report\n/performance [days] — Win rates by Phase (A, B, Fallback)`);
         }
       }
-    } catch (err) { console.error("Poll error:", err.message); await new Promise(r => setTimeout(r, 5000)); }
+    } catch (err) { 
+      console.error("Poll error:", err.message); 
+      await new Promise(r => setTimeout(r, 5000)); 
+    }
   }
 }
 
