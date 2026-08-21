@@ -28,6 +28,9 @@ const PHASE_LABELS = {
 
 const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 
+*📱 Tap Controls:*
+/menu — Launch the 1-Tap Touch Keyboard
+
 *📊 System Overviews:*
 /status — Live status across all 7 bots
 /open — Only bots with active open positions
@@ -36,6 +39,7 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 /streaks — Current & all-time win/loss streaks
 /stats — Quantitative metrics (Profit Factor, Avg W/L)
 /best — Top 5 highest winning trades of all time
+/worst — Top 5 biggest losing trades
 
 *💼 Portfolio Filters:*
 /live — Real-money bots (Test Bot V10 + OmniSight V50)
@@ -46,10 +50,11 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 *🤖 Single Bot Dashboards:*
 /v10, /v50, /v75, /v75s, /v100, /v100s, /v25
 
-*📅 Time & Custom Reports:*
+*📅 Time & Range Summaries:*
 /today [sym] — Today's closed trades (00:00 UTC)
 /yesterday [sym] — Yesterday's 24h performance
 /weekly [sym] — Last 7 days summary
+/biweekly [sym] — Last 14 days summary
 /monthly [sym] — Last 30 days summary
 /report 14 — Last 14 days report
 /report 2026-08-01 2026-08-20 V75 — Custom range
@@ -64,11 +69,13 @@ function parseUtcDate(dateStr) {
   return isNaN(d.getTime()) ? new Date(dateStr) : d;
 }
 
-async function sendTelegram(message) {
+// Resilient Telegram Sender with Interactive Keyboard Support
+async function sendTelegram(message, customKeyboard = null) {
   if (!TG_TOKEN || !TG_CHAT) return;
   const send = async (text, parseMode) => {
     const body = { chat_id: TG_CHAT, text };
     if (parseMode) body.parse_mode = parseMode;
+    if (customKeyboard) body.reply_markup = customKeyboard;
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -86,6 +93,22 @@ async function sendTelegram(message) {
   } catch (err) {
     console.error("Telegram error:", err.message);
   }
+}
+
+async function sendInteractiveMenu() {
+  const keyboard = {
+    keyboard: [
+      [{ text: "/status" }, { text: "/open" }, { text: "/exposure" }],
+      [{ text: "/live" }, { text: "/demo" }, { text: "/ranking" }],
+      [{ text: "/today" }, { text: "/yesterday" }, { text: "/weekly" }],
+      [{ text: "/monthly" }, { text: "/performance" }, { text: "/stats" }],
+      [{ text: "/v10" }, { text: "/v50" }, { text: "/v75" }, { text: "/v75s" }],
+      [{ text: "/v100" }, { text: "/v100s" }, { text: "/v25" }, { text: "/best" }]
+    ],
+    resize_keyboard: true,
+    persistent: true
+  };
+  await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports with zero typing!`, keyboard);
 }
 
 async function fetchTradesJson(repo) {
@@ -158,7 +181,7 @@ function getTradeRealizedPnl(t) {
 
 function filterReposByArgs(args) {
   if (!args || args.length === 0) return REPOS;
-  const upperArgs = args.map(a => a.toUpperCase().replace(/^\//, ""));
+  const upperArgs = args.map(a => a.toUpperCase().replace(/^\//, "").replace(/^TODAY_/, "").replace(/^WEEKLY_/, "").replace(/^MONTHLY_/, "").replace(/^PERF_/, ""));
   const matches = REPOS.filter(r => 
     upperArgs.includes(r.symbol.toUpperCase()) || 
     upperArgs.includes(r.name.toUpperCase()) ||
@@ -291,7 +314,7 @@ async function handleSingleBot(repo) {
   await sendTelegram(msg);
 }
 
-// ── 3. TIME SUMMARIES (/today, /yesterday, /weekly, /monthly) ──
+// ── 3. TIME SUMMARIES (/today, /yesterday, /weekly, /biweekly, /monthly) ──
 async function handleSummary(daysBack, label, args = [], isYesterday = false) {
   const targetRepos = filterReposByArgs(args);
   const isAll = targetRepos.length === REPOS.length;
@@ -401,7 +424,6 @@ async function handleStreaks() {
     let tempWin = 0;
     let tempLoss = 0;
 
-    // Evaluate streaks chronologically
     closed.forEach(t => {
       if (t.result === "WIN") {
         tempWin++;
@@ -414,7 +436,6 @@ async function handleStreaks() {
       }
     });
 
-    // Calculate active streak from the most recent trades
     const lastResult = closed[closed.length - 1]?.result;
     if (lastResult) {
       currentStreakType = lastResult;
@@ -499,30 +520,37 @@ async function handleStats(args = []) {
   await sendTelegram(message);
 }
 
-// ── 7. HALL OF FAME / BEST TRADES (/best) ──
-async function handleBest() {
-  let message = `🌟 *TOP 5 BEST TRADES OF ALL TIME*\n`;
-  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+// ── 7. TOP BEST & WORST TRADES (/best, /worst) ──
+async function handleExtremeTrades(isBest = true) {
+  const label = isBest ? "TOP 5 BEST TRADES 🌟" : "TOP 5 BIGGEST LOSSES ⚠️";
+  let message = `${label}\n━━━━━━━━━━━━━━━━━━━━\n\n`;
 
   const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
 
-  let allClosedTrades = [];
+  let allTrades = [];
   allRepoData.forEach(({ repo, trades }) => {
-    trades.filter(t => t.result === "WIN").forEach(t => {
-      allClosedTrades.push({ ...t, repoLabel: repo.label, pnlVal: getTradeRealizedPnl(t) });
+    trades.filter(t => t.result && t.result !== "CANCELLED").forEach(t => {
+      allTrades.push({ ...t, repoLabel: repo.label, pnlVal: getTradeRealizedPnl(t) });
     });
   });
 
-  allClosedTrades.sort((a, b) => b.pnlVal - a.pnlVal);
-  const topTrades = allClosedTrades.slice(0, 5);
+  if (isBest) {
+    allTrades = allTrades.filter(t => t.pnlVal > 0).sort((a, b) => b.pnlVal - a.pnlVal);
+  } else {
+    allTrades = allTrades.filter(t => t.pnlVal < 0).sort((a, b) => a.pnlVal - b.pnlVal);
+  }
+
+  const topTrades = allTrades.slice(0, 5);
 
   if (topTrades.length === 0) {
-    message += `No winning trades recorded yet.`;
+    message += `No matching trades recorded yet.`;
   } else {
     topTrades.forEach((t, idx) => {
       const phase = PHASE_LABELS[t.entryType] || t.entryType || "Standard";
-      message += `*#${idx + 1} — ${t.repoLabel}* 🚀\n`;
-      message += `💰 P&L: *+$${t.pnlVal.toFixed(2)}* | ${t.direction} @ ${t.entry ? t.entry.toFixed(4) : "N/A"}\n`;
+      const icon = isBest ? "🚀" : "🛑";
+      const pnlSign = t.pnlVal >= 0 ? `+$${t.pnlVal.toFixed(2)}` : `-$${Math.abs(t.pnlVal).toFixed(2)}`;
+      message += `*#${idx + 1} — ${t.repoLabel}* ${icon}\n`;
+      message += `💰 P&L: *${pnlSign}* | ${t.direction} @ ${t.entry ? t.entry.toFixed(4) : "N/A"}\n`;
       message += `⚡ Setup: ${phase}\n`;
       message += `📅 Closed: \`${t.closeTime || t.openTime || "N/A"}\`\n\n`;
     });
@@ -607,7 +635,7 @@ function parseReportArgs(args) {
 }
 
 async function handleReport(args) {
-  if (args.length === 0) { await sendTelegram(REPORT_USAGE); return; }
+  if (args.length === 0) { await sendTelegram(HELP_MANUAL); return; }
   const { fromDate, toDate, symbols } = parseReportArgs(args);
   if (!fromDate) { await sendTelegram(`❓ Couldn't parse report arguments.\n\n${HELP_MANUAL}`); return; }
 
@@ -760,12 +788,17 @@ async function main() {
         const args = parts.slice(1);
         console.log(`💬 Command received: ${raw}`);
 
+        // Interactive Button Menu
+        if (command === "/menu" || command === "/start") {
+          await sendInteractiveMenu();
+        }
+
         // Status & Views
-        if (command === "/status") {
+        else if (command === "/status") {
           await handleStatus(filterReposByArgs(args), "BOT STATUS REPORT", false);
         } else if (command === "/open") {
           await handleStatus(REPOS, "ACTIVE OPEN TRADES", true);
-        } else if (command === "/exposure" || command === "/risk") {
+        } else if (command === "/exposure" || command === "/risk" || command === "/summary") {
           await handleExposure();
         } else if (command === "/ranking" || command === "/leaderboard") {
           await handleRanking();
@@ -774,7 +807,9 @@ async function main() {
         } else if (command === "/stats") {
           await handleStats(args);
         } else if (command === "/best") {
-          await handleBest();
+          await handleExtremeTrades(true);
+        } else if (command === "/worst") {
+          await handleExtremeTrades(false);
         }
 
         // Group Filters
@@ -788,30 +823,42 @@ async function main() {
           await handleStatus(REPOS.filter(r => !r.is1s), "STANDARD VOLATILITY INDICES", false);
         }
 
-        // Single Bot Shortcuts
+        // Single Bot Shortcuts (/v10, /v50, /v75, etc.)
         else if (["/v10", "/v50", "/v75", "/v75s", "/v100", "/v100s", "/v25"].includes(command)) {
           const sym = command.replace("/", "").toUpperCase();
           const target = REPOS.find(r => r.symbol.toUpperCase() === sym);
           if (target) await handleSingleBot(target);
         }
 
-        // Time Summaries
-        else if (command === "/today" || command === "/daily" || command.startsWith("/daily_")) {
+        // Time Summaries with Inline Shortcuts (/today_v75, /weekly_v10, etc.)
+        else if (command === "/today" || command === "/daily" || command.startsWith("/today_") || command.startsWith("/daily_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
           await handleSummary(1, "Daily Summary (Today)", inlineSym, false);
-        } else if (command === "/yesterday") {
-          await handleSummary(1, "Yesterday's Performance", args, true);
+        } else if (command === "/yesterday" || command.startsWith("/yesterday_")) {
+          const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
+          await handleSummary(1, "Yesterday's Performance", inlineSym, true);
         } else if (command === "/weekly" || command.startsWith("/weekly_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
           await handleSummary(7, "Weekly Summary (Last 7 Days)", inlineSym, false);
+        } else if (command === "/biweekly") {
+          await handleSummary(14, "Bi-Weekly Summary (Last 14 Days)", args, false);
         } else if (command === "/monthly" || command.startsWith("/monthly_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
           await handleSummary(30, "Monthly Summary (Last 30 Days)", inlineSym, false);
         }
 
-        // Custom Reports & Performance
+        // Custom Reports & Performance Shortcuts
         else if (command.startsWith("/report")) {
           await handleReport(args);
+        } else if (command === "/perf_today") {
+          await handlePerformance(["1"]);
+        } else if (command === "/perf_7d") {
+          await handlePerformance(["7"]);
+        } else if (command === "/perf_30d") {
+          await handlePerformance(["30"]);
+        } else if (command.startsWith("/perf_") || command.startsWith("/performance_")) {
+          const sym = command.split("_")[1];
+          await handlePerformance([sym]);
         } else if (command.startsWith("/performance") || command.startsWith("/perf")) {
           await handlePerformance(args);
         } else if (command === "/help") {
