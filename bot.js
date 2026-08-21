@@ -8,13 +8,13 @@ const GH_USER  = "Kwekugrind";
 
 // Multipliers and commissions matched to individual bot repositories
 const REPOS = [
-  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
-  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
-  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
-  { name: "coffee",         altName: "Coffee", label: "Coffee Machine (V75S)", symbol: "V75S",  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
-  { name: "OmniSight",      label: "OmniSight (V50)",       symbol: "V50",   derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
-  { name: "ice-cream",      altName: "Ice-Cream", label: "Ice Cream (V100S)", symbol: "V100S", derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
-  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
+  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
+  { name: "OmniSight",      label: "OmniSight (V50 Live)",  symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
+  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
+  { name: "coffee",         altName: "Coffee", label: "Coffee Machine (V75S)", symbol: "V75S", isLive: false, is1s: true,  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
+  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
+  { name: "ice-cream",      altName: "Ice-Cream", label: "Ice Cream (V100S)", symbol: "V100S", isLive: false, is1s: true,  derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
+  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
 ];
 
 const PHASE_LABELS = {
@@ -26,35 +26,37 @@ const PHASE_LABELS = {
   PHASE_D: "Phase D — Shallow Pullback",
 };
 
-const REPORT_USAGE = `📖 *Report Command Usage*
+const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 
-*By number of days:*
-/report 7 — Last 7 days, all bots
-/report 7 V10 — Last 7 days, Test Bot only
-/report 7 V10 V50 — Last 7 days, Test Bot + OmniSight
-/report 30 — Last 30 days, all bots
-/report 30 V100 — Last 30 days, Milk only
+*📊 System Overviews:*
+/status — Live status across all 7 bots
+/open — Only bots with active open positions
+/exposure — Real-time capital risk & live margin
+/ranking — Leaderboard ranked by net profit & win rate
+/streaks — Current & all-time win/loss streaks
+/stats — Quantitative metrics (Profit Factor, Avg W/L)
+/best — Top 5 highest winning trades of all time
 
-*By single date:*
-/report 2026-07-01 — That day, all bots
-/report 2026-07-01 V75 — That day, Lery's only
+*💼 Portfolio Filters:*
+/live — Real-money bots (Test Bot V10 + OmniSight V50)
+/demo — Demo practice portfolio (5 bots)
+/fast — 1-Second tick indices (Coffee V75S + Ice Cream V100S)
+/standard — Standard volatility indices (V10, V25, V50, V75, V100)
 
-*By date range:*
-/report 2026-07-01 2026-07-31 — Full range, all bots
-/report 2026-07-01 2026-07-31 V75 V100 — Full range, specific bots
+*🤖 Single Bot Dashboards:*
+/v10, /v50, /v75, /v75s, /v100, /v100s, /v25
 
-*Symbol codes:*
-V10 = Test Bot (R_10)
-V25 = Tea (R_25)
-V50 = OmniSight (R_50)
-V75 = Lery's Alerts (R_75)
-V75S = Coffee (1HZ75V)
-V100 = Milk (R_100)
-V100S = Ice Cream (1HZ100V)
+*📅 Time & Custom Reports:*
+/today [sym] — Today's closed trades (00:00 UTC)
+/yesterday [sym] — Yesterday's 24h performance
+/weekly [sym] — Last 7 days summary
+/monthly [sym] — Last 30 days summary
+/report 14 — Last 14 days report
+/report 2026-08-01 2026-08-20 V75 — Custom range
 
-💡 You can combine any number of symbols. Separate with spaces.`;
+*🔬 Strategy Analytics:*
+/performance [days] [sym] — Win rate by Phase setup`;
 
-// Helper to safely parse UTC date strings
 function parseUtcDate(dateStr) {
   if (!dateStr) return null;
   const isoStr = dateStr.includes("T") ? dateStr : dateStr.replace(" ", "T") + "Z";
@@ -62,7 +64,6 @@ function parseUtcDate(dateStr) {
   return isNaN(d.getTime()) ? new Date(dateStr) : d;
 }
 
-// Resilient Telegram Sender with Markdown error fallback
 async function sendTelegram(message) {
   if (!TG_TOKEN || !TG_CHAT) return;
   const send = async (text, parseMode) => {
@@ -87,7 +88,6 @@ async function sendTelegram(message) {
   }
 }
 
-// Real-time un-cached fetch of trades.json directly from GitHub API/Raw
 async function fetchTradesJson(repo) {
   const headers = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -96,7 +96,6 @@ async function fetchTradesJson(repo) {
   };
   if (GH_TOKEN) headers["Authorization"] = `Bearer ${GH_TOKEN}`;
 
-  // 1. Primary: Direct raw endpoint with cache-busting timestamp
   const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.name}/main/trades.json?t=${Date.now()}`;
   try {
     const res = await fetch(rawUrl, { headers });
@@ -106,7 +105,6 @@ async function fetchTradesJson(repo) {
     }
   } catch {}
 
-  // 2. Fallback: Secondary repo casing or GitHub REST API contents
   if (repo.altName) {
     const altUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.altName}/main/trades.json?t=${Date.now()}`;
     try {
@@ -121,7 +119,6 @@ async function fetchTradesJson(repo) {
   return [];
 }
 
-// Fast WebSocket Spot Price Fetcher (with 3-second quick timeout)
 async function fetchCurrentPrice(derivSymbol) {
   return new Promise((resolve) => {
     try {
@@ -151,7 +148,6 @@ function formatDuration(mins) {
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
-// Helper to extract true Realized P&L from a closed trade record
 function getTradeRealizedPnl(t) {
   if (typeof t.serverPnl === 'number') return t.serverPnl;
   if (typeof t.pnl === 'number') return t.pnl;
@@ -160,20 +156,30 @@ function getTradeRealizedPnl(t) {
   return 0;
 }
 
-// ── 1. STATUS HANDLER (Parallelized for Instant Response) ──
-async function handleStatus() {
-  let message = `📊 *BOT STATUS REPORT*\n🕒 ${new Date().toUTCString()}\n\n`;
+function filterReposByArgs(args) {
+  if (!args || args.length === 0) return REPOS;
+  const upperArgs = args.map(a => a.toUpperCase().replace(/^\//, ""));
+  const matches = REPOS.filter(r => 
+    upperArgs.includes(r.symbol.toUpperCase()) || 
+    upperArgs.includes(r.name.toUpperCase()) ||
+    upperArgs.includes(r.derivSymbol.toUpperCase())
+  );
+  return matches.length > 0 ? matches : REPOS;
+}
 
-  // Fetch all 7 repos and live prices in parallel
-  const repoDataPromises = REPOS.map(async (repo) => {
+// ── 1. STATUS & GROUPED PORTFOLIO HANDLER ──
+async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", onlyOpen = false) {
+  let message = `📊 *${title}*\n🕒 ${new Date().toUTCString()}\n\n`;
+
+  const allRepoData = await Promise.all(targetRepos.map(async (repo) => {
     const [trades, currentPrice] = await Promise.all([
       fetchTradesJson(repo),
       fetchCurrentPrice(repo.derivSymbol)
     ]);
     return { repo, trades, currentPrice };
-  });
+  }));
 
-  const allRepoData = await Promise.all(repoDataPromises);
+  let totalActive = 0;
 
   for (const { repo, trades, currentPrice } of allRepoData) {
     const openTrades = trades.filter(t => !t.result && !t.pending);
@@ -181,9 +187,12 @@ async function handleStatus() {
     const wins = closed.filter(t => t.result === "WIN").length;
     const losses = closed.filter(t => t.result === "LOSS").length;
 
-    message += `*${repo.label}*\n`;
+    if (onlyOpen && openTrades.length === 0) continue;
+
+    message += `*${repo.label}* ${repo.isLive ? "🟢 (Live)" : "🔵 (Demo)"}\n`;
 
     if (openTrades.length > 0) {
+      totalActive += openTrades.length;
       for (const open of openTrades) {
         const openDate = parseUtcDate(open.openTime);
         const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
@@ -196,9 +205,9 @@ async function handleStatus() {
           const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
           const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
           const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
-          message += `${pnlIcon} P&L: ${pnlStr} (@ ${currentPrice.toFixed(4)})\n`;
+          message += `${pnlIcon} Unrealized P&L: *${pnlStr}* (@ ${currentPrice.toFixed(4)})\n`;
         }
-        message += `⏱ ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
+        message += `⏱ Active: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
       }
       message += `\n`;
     } else {
@@ -206,34 +215,114 @@ async function handleStatus() {
       if (closed.length > 0) {
         const totalPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
         const pnlStr = totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`;
-        message += `W: ${wins} | L: ${losses} | Total: ${closed.length} | Net: ${pnlStr}\n`;
+        message += `Closed: ${closed.length} | W: ${wins} | L: ${losses} | Net: ${pnlStr}\n`;
       }
       message += `\n`;
     }
   }
 
+  if (onlyOpen && totalActive === 0) {
+    message += `🌴 *No active positions open across any bot right now.*`;
+  }
+
   await sendTelegram(message);
 }
 
-// ── 2. SUMMARY HANDLER (/daily, /weekly, /monthly) ──
-async function handleSummary(daysBack, label) {
-  let message = `📊 *${label} — ALL BOTS*\n🕒 ${new Date().toUTCString()}\n\n`;
-  const cutoff = new Date();
-  if (daysBack === 1) {
-    cutoff.setUTCHours(0, 0, 0, 0); // Start of today UTC
+// ── 2. SINGLE BOT DEDICATED DASHBOARD ──
+async function handleSingleBot(repo) {
+  const [trades, currentPrice] = await Promise.all([
+    fetchTradesJson(repo),
+    fetchCurrentPrice(repo.derivSymbol)
+  ]);
+
+  const openTrades = trades.filter(t => !t.result && !t.pending);
+  const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
+  const wins = closed.filter(t => t.result === "WIN").length;
+  const losses = closed.filter(t => t.result === "LOSS").length;
+  const winRate = closed.length ? ((wins / closed.length) * 100).toFixed(1) : 0;
+  const totalNetPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
+
+  const todayCutoff = new Date();
+  todayCutoff.setUTCHours(0, 0, 0, 0);
+  const todayTrades = closed.filter(t => {
+    const cd = parseUtcDate(t.closeTime);
+    return cd && cd >= todayCutoff;
+  });
+  const todayWins = todayTrades.filter(t => t.result === "WIN").length;
+  const todayLosses = todayTrades.filter(t => t.result === "LOSS").length;
+  const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const todayPnlStr = todayPnl >= 0 ? `+$${todayPnl.toFixed(2)}` : `-$${Math.abs(todayPnl).toFixed(2)}`;
+
+  let msg = `🤖 *${repo.label} Dashboard*\n`;
+  msg += `Symbol: \`${repo.derivSymbol}\` | Stake: $5.00 | Mult: ${repo.multiplier}x\n`;
+  msg += `Account: ${repo.isLive ? "🟢 Real Live" : "🔵 Demo"}\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+
+  if (openTrades.length > 0) {
+    msg += `📍 *Active Position:*\n`;
+    for (const open of openTrades) {
+      const openDate = parseUtcDate(open.openTime);
+      const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
+      msg += `• Direction: *${open.direction}* @ ${open.entry ? open.entry.toFixed(4) : "N/A"}\n`;
+      msg += `• Stop Loss: ${open.sl ? open.sl.toFixed(4) : "N/A"}\n`;
+      msg += `• Target TP1: ${open.tp1 ? open.tp1.toFixed(4) : "N/A"}\n`;
+      if (currentPrice !== null && open.entry) {
+        const rawPnl = open.direction === "BUY"
+          ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
+          : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
+        const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+        const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
+        msg += `• Live Spot: ${currentPrice.toFixed(4)} | P&L: *${pnlStr}*\n`;
+      }
+      msg += `• Duration: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
+    }
   } else {
-    cutoff.setDate(cutoff.getDate() - daysBack);
-    cutoff.setUTCHours(0, 0, 0, 0);
+    msg += `⚪ *Active Position:* None (Scanning market)\n`;
   }
 
-  const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+  msg += `\n📅 *Today's Performance:*\n`;
+  msg += `Trades: ${todayTrades.length} | W: ${todayWins} | L: ${todayLosses} | Net: *${todayPnlStr}*\n`;
+
+  msg += `\n📈 *All-Time Statistics:*\n`;
+  msg += `Total Closed: ${closed.length} | Win Rate: *${winRate}%*\n`;
+  msg += `Total Realized P&L: *${totalPnlStr}*\n`;
+
+  await sendTelegram(msg);
+}
+
+// ── 3. TIME SUMMARIES (/today, /yesterday, /weekly, /monthly) ──
+async function handleSummary(daysBack, label, args = [], isYesterday = false) {
+  const targetRepos = filterReposByArgs(args);
+  const isAll = targetRepos.length === REPOS.length;
+  const headerSuffix = isAll ? "ALL BOTS" : targetRepos.map(r => r.symbol).join(", ");
+  let message = `📊 *${label} — ${headerSuffix}*\n🕒 ${new Date().toUTCString()}\n\n`;
+
+  const startCutoff = new Date();
+  const endCutoff = new Date();
+
+  if (isYesterday) {
+    startCutoff.setDate(startCutoff.getDate() - 1);
+    startCutoff.setUTCHours(0, 0, 0, 0);
+    endCutoff.setDate(endCutoff.getDate() - 1);
+    endCutoff.setUTCHours(23, 59, 59, 999);
+  } else if (daysBack === 1) {
+    startCutoff.setUTCHours(0, 0, 0, 0);
+  } else {
+    startCutoff.setDate(startCutoff.getDate() - daysBack);
+    startCutoff.setUTCHours(0, 0, 0, 0);
+  }
+
+  const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
   let grandWins = 0, grandLosses = 0, grandPnl = 0, grandTotal = 0;
 
   for (const { repo, trades } of allRepoData) {
     const pt = trades.filter(t => {
       if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
       const closeDate = parseUtcDate(t.closeTime);
-      return closeDate && closeDate >= cutoff;
+      if (!closeDate) return false;
+      if (isYesterday) return closeDate >= startCutoff && closeDate <= endCutoff;
+      return closeDate >= startCutoff;
     });
 
     if (pt.length === 0) { 
@@ -247,20 +336,255 @@ async function handleSummary(daysBack, label) {
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
 
-    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: ${netStr}\n\n`;
+    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
 
-  if (grandTotal > 0) {
+  if (targetRepos.length > 1 && grandTotal > 0) {
     const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandStr = grandPnl >= 0 ? `+$${grandPnl.toFixed(2)}` : `-$${Math.abs(grandPnl).toFixed(2)}`;
-    message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL — All Bots*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
+    message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL COMBINED*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
+  }
+  await sendTelegram(message);
+}
+
+// ── 4. LEADERBOARD & PROFITABILITY RANKING (/ranking) ──
+async function handleRanking() {
+  let message = `🏆 *PROFITABILITY RANKINGS — ALL BOTS*\n🕒 ${new Date().toUTCString()}\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+
+  const rankedList = allRepoData.map(({ repo, trades }) => {
+    const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
+    const wins = closed.filter(t => t.result === "WIN").length;
+    const losses = closed.filter(t => t.result === "LOSS").length;
+    const netPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+    const winRate = closed.length ? (wins / closed.length) * 100 : 0;
+    return { repo, total: closed.length, wins, losses, netPnl, winRate };
+  }).sort((a, b) => b.netPnl - a.netPnl);
+
+  const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"];
+
+  rankedList.forEach((item, index) => {
+    const pnlStr = item.netPnl >= 0 ? `+$${item.netPnl.toFixed(2)}` : `-$${Math.abs(item.netPnl).toFixed(2)}`;
+    const tag = item.repo.isLive ? "🟢 Live" : "🔵 Demo";
+    message += `${medals[index]} *${item.repo.symbol}* (${item.repo.label.split(" ")[0]} - ${tag})\n`;
+    message += `   Net: *${pnlStr}* | WR: *${item.winRate.toFixed(1)}%* | ${item.total} trades (W:${item.wins} L:${item.losses})\n\n`;
+  });
+
+  const totalPortfolioPnl = rankedList.reduce((sum, i) => sum + i.netPnl, 0);
+  const totalPnlStr = totalPortfolioPnl >= 0 ? `+$${totalPortfolioPnl.toFixed(2)}` : `-$${Math.abs(totalPortfolioPnl).toFixed(2)}`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n💼 *Total Portfolio Realized P&L:* *${totalPnlStr}*`;
+
+  await sendTelegram(message);
+}
+
+// ── 5. STREAKS ANALYSIS (/streaks) ──
+async function handleStreaks() {
+  let message = `🔥 *WIN/LOSS STREAKS TRACKER*\n🕒 ${new Date().toUTCString()}\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+
+  for (const { repo, trades } of allRepoData) {
+    const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
+    if (closed.length === 0) {
+      message += `*${repo.label}*: No closed trades yet.\n\n`;
+      continue;
+    }
+
+    let currentStreakType = null;
+    let currentStreakCount = 0;
+    let maxWinStreak = 0;
+    let maxLossStreak = 0;
+    let tempWin = 0;
+    let tempLoss = 0;
+
+    // Evaluate streaks chronologically
+    closed.forEach(t => {
+      if (t.result === "WIN") {
+        tempWin++;
+        tempLoss = 0;
+        if (tempWin > maxWinStreak) maxWinStreak = tempWin;
+      } else if (t.result === "LOSS") {
+        tempLoss++;
+        tempWin = 0;
+        if (tempLoss > maxLossStreak) maxLossStreak = tempLoss;
+      }
+    });
+
+    // Calculate active streak from the most recent trades
+    const lastResult = closed[closed.length - 1]?.result;
+    if (lastResult) {
+      currentStreakType = lastResult;
+      for (let i = closed.length - 1; i >= 0; i--) {
+        if (closed[i].result === lastResult) currentStreakCount++;
+        else break;
+      }
+    }
+
+    const streakIcon = currentStreakType === "WIN" ? "🔥" : "❄️";
+    message += `*${repo.label}*\n`;
+    message += `${streakIcon} Current Streak: *${currentStreakCount} ${currentStreakType}S*\n`;
+    message += `🏆 Best Win Streak: *${maxWinStreak}W* | ⚠️ Max Loss Streak: *${maxLossStreak}L*\n\n`;
   }
 
   await sendTelegram(message);
 }
 
-// ── 3. REPORT PARSER & HANDLER ──
+// ── 6. QUANTITATIVE STATS & PROFIT FACTOR (/stats) ──
+async function handleStats(args = []) {
+  const targetRepos = filterReposByArgs(args);
+  const isAll = targetRepos.length === REPOS.length;
+  const headerSuffix = isAll ? "ALL BOTS" : targetRepos.map(r => r.symbol).join(", ");
+  let message = `📐 *QUANTITATIVE PERFORMANCE METRICS — ${headerSuffix}*\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+
+  let totalWinsCount = 0;
+  let totalLossCount = 0;
+  let totalGrossProfit = 0;
+  let totalGrossLoss = 0;
+
+  for (const { repo, trades } of allRepoData) {
+    const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
+    if (closed.length === 0) continue;
+
+    let grossWin = 0;
+    let grossLoss = 0;
+    let wins = 0;
+    let losses = 0;
+
+    closed.forEach(t => {
+      const pnl = getTradeRealizedPnl(t);
+      if (pnl >= 0) {
+        grossWin += pnl;
+        wins++;
+      } else {
+        grossLoss += Math.abs(pnl);
+        losses++;
+      }
+    });
+
+    const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? "∞" : "0.00";
+    const avgWin = wins > 0 ? (grossWin / wins).toFixed(2) : "0.00";
+    const avgLoss = losses > 0 ? (grossLoss / losses).toFixed(2) : "0.00";
+
+    totalWinsCount += wins;
+    totalLossCount += losses;
+    totalGrossProfit += grossWin;
+    totalGrossLoss += grossLoss;
+
+    message += `*${repo.label}*\n`;
+    message += `• Profit Factor: *${pf}*\n`;
+    message += `• Avg Win: *+$${avgWin}* | Avg Loss: *-$${avgLoss}*\n`;
+    message += `• Gross Win: +$${grossWin.toFixed(2)} | Gross Loss: -$${grossLoss.toFixed(2)}\n\n`;
+  }
+
+  if (targetRepos.length > 1) {
+    const grandPF = totalGrossLoss > 0 ? (totalGrossProfit / totalGrossLoss).toFixed(2) : "∞";
+    const grandAvgWin = totalWinsCount > 0 ? (totalGrossProfit / totalWinsCount).toFixed(2) : "0.00";
+    const grandAvgLoss = totalLossCount > 0 ? (totalGrossLoss / totalLossCount).toFixed(2) : "0.00";
+
+    message += `━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED PORTFOLIO STATS*\n`;
+    message += `• Combined Profit Factor: *${grandPF}*\n`;
+    message += `• Portfolio Avg Win: *+$${grandAvgWin}*\n`;
+    message += `• Portfolio Avg Loss: *-$${grandAvgLoss}*\n`;
+    message += `• Total Realized Profit: *+$${totalGrossProfit.toFixed(2)}*\n`;
+    message += `• Total Realized Loss: *-$${totalGrossLoss.toFixed(2)}*`;
+  }
+
+  await sendTelegram(message);
+}
+
+// ── 7. HALL OF FAME / BEST TRADES (/best) ──
+async function handleBest() {
+  let message = `🌟 *TOP 5 BEST TRADES OF ALL TIME*\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+
+  let allClosedTrades = [];
+  allRepoData.forEach(({ repo, trades }) => {
+    trades.filter(t => t.result === "WIN").forEach(t => {
+      allClosedTrades.push({ ...t, repoLabel: repo.label, pnlVal: getTradeRealizedPnl(t) });
+    });
+  });
+
+  allClosedTrades.sort((a, b) => b.pnlVal - a.pnlVal);
+  const topTrades = allClosedTrades.slice(0, 5);
+
+  if (topTrades.length === 0) {
+    message += `No winning trades recorded yet.`;
+  } else {
+    topTrades.forEach((t, idx) => {
+      const phase = PHASE_LABELS[t.entryType] || t.entryType || "Standard";
+      message += `*#${idx + 1} — ${t.repoLabel}* 🚀\n`;
+      message += `💰 P&L: *+$${t.pnlVal.toFixed(2)}* | ${t.direction} @ ${t.entry ? t.entry.toFixed(4) : "N/A"}\n`;
+      message += `⚡ Setup: ${phase}\n`;
+      message += `📅 Closed: \`${t.closeTime || t.openTime || "N/A"}\`\n\n`;
+    });
+  }
+
+  await sendTelegram(message);
+}
+
+// ── 8. RISK & LIVE EXPOSURE METER (/exposure) ──
+async function handleExposure() {
+  let message = `🛡️ *PORTFOLIO RISK & LIVE EXPOSURE*\n🕒 ${new Date().toUTCString()}\n`;
+  message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  const allRepoData = await Promise.all(REPOS.map(async (repo) => {
+    const [trades, currentPrice] = await Promise.all([
+      fetchTradesJson(repo),
+      fetchCurrentPrice(repo.derivSymbol)
+    ]);
+    return { repo, trades, currentPrice };
+  }));
+
+  let totalActiveContracts = 0;
+  let totalStakeDeployed = 0;
+  let totalUnrealizedPnl = 0;
+  let totalMaxRisk = 0;
+
+  for (const { repo, trades, currentPrice } of allRepoData) {
+    const openTrades = trades.filter(t => !t.result && !t.pending);
+    if (openTrades.length === 0) continue;
+
+    for (const open of openTrades) {
+      totalActiveContracts++;
+      totalStakeDeployed += 5.00;
+      totalMaxRisk += (open.brokerSlAmount || 5.00);
+
+      let pnlDollars = 0;
+      if (currentPrice !== null && open.entry) {
+        const rawPnl = open.direction === "BUY"
+          ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
+          : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
+        pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+        totalUnrealizedPnl += pnlDollars;
+      }
+
+      const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
+      message += `*${repo.label}*: ${open.direction} @ ${open.entry?.toFixed(4) || "N/A"}\n`;
+      message += `• Current P&L: *${pnlStr}* | Hard Stop: $${open.brokerSlAmount ? open.brokerSlAmount.toFixed(2) : "5.00"}\n\n`;
+    }
+  }
+
+  const netPnlStr = totalUnrealizedPnl >= 0 ? `+$${totalUnrealizedPnl.toFixed(2)}` : `-$${Math.abs(totalUnrealizedPnl).toFixed(2)}`;
+
+  message += `━━━━━━━━━━━━━━━━━━━━\n`;
+  message += `• Active Positions: *${totalActiveContracts}*\n`;
+  message += `• Margin Deployed: *$${totalStakeDeployed.toFixed(2)}*\n`;
+  message += `• Max Downside Risk: *$${totalMaxRisk.toFixed(2)}*\n`;
+  message += `• Total Floating P&L: *${netPnlStr}*`;
+
+  await sendTelegram(message);
+}
+
+// ── 9. CUSTOM REPORT PARSER & HANDLER (/report) ──
 function parseReportArgs(args) {
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
   const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
@@ -285,7 +609,7 @@ function parseReportArgs(args) {
 async function handleReport(args) {
   if (args.length === 0) { await sendTelegram(REPORT_USAGE); return; }
   const { fromDate, toDate, symbols } = parseReportArgs(args);
-  if (!fromDate) { await sendTelegram(`❓ Couldn't parse that.\n\n${REPORT_USAGE}`); return; }
+  if (!fromDate) { await sendTelegram(`❓ Couldn't parse report arguments.\n\n${HELP_MANUAL}`); return; }
 
   const from = new Date(fromDate + "T00:00:00Z");
   const to   = new Date(toDate   + "T23:59:59Z");
@@ -314,19 +638,19 @@ async function handleReport(args) {
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
     
-    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: ${netStr}\n\n`;
+    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
 
   if (filteredRepos.length > 1 && grandTotal > 0) {
     const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandStr = grandPnl >= 0 ? `+$${grandPnl.toFixed(2)}` : `-$${Math.abs(grandPnl).toFixed(2)}`;
-    message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL — All Bots*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
+    message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL COMBINED*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
   }
   await sendTelegram(message);
 }
 
-// ── 4. PHASE PERFORMANCE HANDLER (/performance, /perf) ──
+// ── 10. PHASE PERFORMANCE HANDLER (/performance, /perf) ──
 function phaseStats(trades, phase) {
   const pt = phase === "UNKNOWN"
     ? trades.filter(t => !t.entryType || !PHASE_LABELS[t.entryType])
@@ -342,8 +666,12 @@ function phaseStats(trades, phase) {
 async function handlePerformance(args) {
   let cutoff = null;
   let cutoffLabel = "All-Time";
-  if (args.length > 0 && /^\d+$/.test(args[0])) {
-    const days = parseInt(args[0]);
+  const numArg = args.find(a => /^\d+$/.test(a));
+  const symArgs = args.filter(a => !/^\d+$/.test(a));
+  const targetRepos = filterReposByArgs(symArgs);
+
+  if (numArg) {
+    const days = parseInt(numArg);
     cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     cutoff.setUTCHours(0, 0, 0, 0);
@@ -354,10 +682,11 @@ async function handlePerformance(args) {
   const grandStats = {};
   allPhases.forEach(p => { grandStats[p] = { count: 0, wins: 0, losses: 0, net$: 0 }; });
 
-  let message = `🔬 *Phase Performance Report — ${cutoffLabel}*\n🕒 ${new Date().toUTCString()}\n`;
+  const targetSuffix = targetRepos.length === REPOS.length ? "All Bots" : targetRepos.map(r => r.symbol).join(", ");
+  let message = `🔬 *Phase Performance — ${cutoffLabel} (${targetSuffix})*\n🕒 ${new Date().toUTCString()}\n`;
   message += `━━━━━━━━━━━━━━━━━━━━\n`;
 
-  const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
+  const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
 
   for (const { repo, trades } of allRepoData) {
     const closed = trades.filter(t => {
@@ -376,9 +705,9 @@ async function handlePerformance(args) {
       const label = phase === "UNKNOWN" 
         ? "🔘 Legacy / Unknown" 
         : `${PHASE_LABELS[phase] || phase}`;
-      const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$.toFixed(2)}`;
+      const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$).toFixed(2)}`;
       const icon   = s.wr >= 60 ? "🟢" : s.wr >= 45 ? "🟡" : "🔴";
-      message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net: ${netStr}\n`;
+      message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net: *${netStr}*\n`;
       
       grandStats[phase].count += s.count;
       grandStats[phase].wins  += s.wins;
@@ -388,24 +717,26 @@ async function handlePerformance(args) {
     if (!hasAny) message += `  No closed trades in period.\n`;
   }
 
-  message += `\n━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED — All Bots*\n`;
-  let anyGrand = false;
-  for (const phase of allPhases) {
-    const g = grandStats[phase];
-    if (g.count === 0) continue;
-    anyGrand = true;
-    const wr     = ((g.wins / g.count) * 100).toFixed(1);
-    const netStr = g.net$ >= 0 ? `+$${g.net$.toFixed(2)}` : `-$${Math.abs(g.net$).toFixed(2)}`;
-    const icon   = wr >= 60 ? "🟢" : wr >= 45 ? "🟡" : "🔴";
-    const label  = PHASE_LABELS[phase] || (phase === "UNKNOWN" ? "Legacy / Unknown" : phase);
-    message += `${icon} ${label}: ${g.count} trades | WR:${wr}% | Net: ${netStr}\n`;
+  if (targetRepos.length > 1) {
+    message += `\n━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED TOTALS*\n`;
+    let anyGrand = false;
+    for (const phase of allPhases) {
+      const g = grandStats[phase];
+      if (g.count === 0) continue;
+      anyGrand = true;
+      const wr     = ((g.wins / g.count) * 100).toFixed(1);
+      const netStr = g.net$ >= 0 ? `+$${g.net$.toFixed(2)}` : `-$${Math.abs(g.net$).toFixed(2)}`;
+      const icon   = wr >= 60 ? "🟢" : wr >= 45 ? "🟡" : "🔴";
+      const label  = PHASE_LABELS[phase] || (phase === "UNKNOWN" ? "Legacy / Unknown" : phase);
+      message += `${icon} ${label}: ${g.count} trades | WR:${wr}% | Net: *${netStr}*\n`;
+    }
+    if (!anyGrand) message += `No closed trades found.\n`;
   }
-  if (!anyGrand) message += `No closed trades found.\n`;
 
   await sendTelegram(message);
 }
 
-// ── 5. POLLING & MAIN LOOP ──
+// ── 11. MAIN DISPATCH LOOP ──
 async function getUpdates(offset) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
@@ -415,7 +746,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Command Center bot started...");
+  console.log("🤖 Multi-Repo Command Center started...");
   let offset = 0;
   while (true) {
     try {
@@ -424,22 +755,69 @@ async function main() {
         offset = update.update_id + 1;
         const raw = update.message?.text?.trim() || "";
         if (!raw) continue;
-        const lower = raw.toLowerCase();
+        const parts = raw.split(/\s+/);
+        const command = parts[0].toLowerCase();
+        const args = parts.slice(1);
         console.log(`💬 Command received: ${raw}`);
 
-        if (lower === "/status")       await handleStatus();
-        else if (lower === "/daily")   await handleSummary(1,  "Daily Summary (Today)");
-        else if (lower === "/weekly")  await handleSummary(7,  "Weekly Summary (Last 7 Days)");
-        else if (lower === "/monthly") await handleSummary(30, "Monthly Summary (Last 30 Days)");
-        else if (lower.startsWith("/report")) {
-          const args = raw.slice("/report".length).trim().split(/\s+/).filter(Boolean);
+        // Status & Views
+        if (command === "/status") {
+          await handleStatus(filterReposByArgs(args), "BOT STATUS REPORT", false);
+        } else if (command === "/open") {
+          await handleStatus(REPOS, "ACTIVE OPEN TRADES", true);
+        } else if (command === "/exposure" || command === "/risk") {
+          await handleExposure();
+        } else if (command === "/ranking" || command === "/leaderboard") {
+          await handleRanking();
+        } else if (command === "/streaks") {
+          await handleStreaks();
+        } else if (command === "/stats") {
+          await handleStats(args);
+        } else if (command === "/best") {
+          await handleBest();
+        }
+
+        // Group Filters
+        else if (command === "/live") {
+          await handleStatus(REPOS.filter(r => r.isLive), "LIVE ACCOUNTS PORTFOLIO (V10 + V50)", false);
+        } else if (command === "/demo") {
+          await handleStatus(REPOS.filter(r => !r.isLive), "DEMO ACCOUNTS PORTFOLIO (5 BOTS)", false);
+        } else if (command === "/fast" || command === "/1s") {
+          await handleStatus(REPOS.filter(r => r.is1s), "1-SECOND HIGH-FREQUENCY INDICES (V75S + V100S)", false);
+        } else if (command === "/standard") {
+          await handleStatus(REPOS.filter(r => !r.is1s), "STANDARD VOLATILITY INDICES", false);
+        }
+
+        // Single Bot Shortcuts
+        else if (["/v10", "/v50", "/v75", "/v75s", "/v100", "/v100s", "/v25"].includes(command)) {
+          const sym = command.replace("/", "").toUpperCase();
+          const target = REPOS.find(r => r.symbol.toUpperCase() === sym);
+          if (target) await handleSingleBot(target);
+        }
+
+        // Time Summaries
+        else if (command === "/today" || command === "/daily" || command.startsWith("/daily_")) {
+          const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
+          await handleSummary(1, "Daily Summary (Today)", inlineSym, false);
+        } else if (command === "/yesterday") {
+          await handleSummary(1, "Yesterday's Performance", args, true);
+        } else if (command === "/weekly" || command.startsWith("/weekly_")) {
+          const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
+          await handleSummary(7, "Weekly Summary (Last 7 Days)", inlineSym, false);
+        } else if (command === "/monthly" || command.startsWith("/monthly_")) {
+          const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
+          await handleSummary(30, "Monthly Summary (Last 30 Days)", inlineSym, false);
+        }
+
+        // Custom Reports & Performance
+        else if (command.startsWith("/report")) {
           await handleReport(args);
-        } else if (lower.startsWith("/performance") || lower.startsWith("/perf")) {
-          const cmd = lower.startsWith("/performance") ? "/performance" : "/perf";
-          const args = raw.slice(cmd.length).trim().split(/\s+/).filter(Boolean);
+        } else if (command.startsWith("/performance") || command.startsWith("/perf")) {
           await handlePerformance(args);
+        } else if (command === "/help") {
+          await sendTelegram(HELP_MANUAL);
         } else {
-          await sendTelegram(`❓ Unknown command: ${raw}\n\nAvailable Commands:\n/status — Live status across all bots\n/daily — Today's closed trades\n/weekly — Last 7 days summary\n/monthly — Last 30 days summary\n/report — Custom date/symbol report\n/performance [days] — Win rates by Phase`);
+          await sendTelegram(HELP_MANUAL);
         }
       }
     } catch (err) { 
