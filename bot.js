@@ -66,7 +66,7 @@ function parseUtcDate(dateStr) {
   if (!dateStr) return null;
   const isoStr = dateStr.includes("T") ? dateStr : dateStr.replace(" ", "T") + "Z";
   const d = new Date(isoStr);
-  return isNaN(d.getTime()) ? new Date(dateStr) : d;
+  return isNaN(d.getTime()) ? null : d;
 }
 
 // Resilient Telegram Sender with Interactive Keyboard Support
@@ -87,6 +87,7 @@ async function sendTelegram(message, customKeyboard = null) {
   try {
     const data = await send(message, "Markdown");
     if (!data.ok) {
+      console.error(`Telegram Markdown rejected (${data.error_code || data.error || 'unknown'}): ${data.description || JSON.stringify(data)}`);
       const plain = message.replace(/[*_`\[\]]/g, "");
       await send(plain, "");
     }
@@ -111,6 +112,7 @@ async function sendInteractiveMenu() {
   await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports with zero typing!`, keyboard);
 }
 
+// ── ADVANCED DEDUPLICATION & FETCH ENGINE ──
 async function fetchTradesJson(repo) {
   const headers = {
     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -119,27 +121,46 @@ async function fetchTradesJson(repo) {
   };
   if (GH_TOKEN) headers["Authorization"] = `Bearer ${GH_TOKEN}`;
 
-  const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.name}/main/trades.json?t=${Date.now()}`;
+  const cacheBuster = `?t=${Date.now()}&r=${Math.random()}`;
+  let rawTrades = [];
+
+  const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.name}/main/trades.json${cacheBuster}`;
   try {
     const res = await fetch(rawUrl, { headers });
     if (res.ok) {
       const json = await res.json();
-      if (Array.isArray(json)) return json;
+      if (Array.isArray(json)) rawTrades = json;
     }
   } catch {}
 
-  if (repo.altName) {
-    const altUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.altName}/main/trades.json?t=${Date.now()}`;
+  if (rawTrades.length === 0 && repo.altName) {
+    const altUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.altName}/main/trades.json${cacheBuster}`;
     try {
       const res = await fetch(altUrl, { headers });
       if (res.ok) {
         const json = await res.json();
-        if (Array.isArray(json)) return json;
+        if (Array.isArray(json)) rawTrades = json;
       }
     } catch {}
   }
 
-  return [];
+  // Deduplicate trades by ID or ContractId to eliminate ghost copies
+  const uniqueTrades = new Map();
+  for (const t of rawTrades) {
+    const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
+    if (key) {
+      const existing = uniqueTrades.get(key);
+      if (!existing) {
+        uniqueTrades.set(key, t);
+      } else {
+        // Keep the most finalized version of the trade
+        if (!existing.result && t.result) uniqueTrades.set(key, t);
+        else if (!existing.closeTime && t.closeTime) uniqueTrades.set(key, t);
+      }
+    }
+  }
+
+  return Array.from(uniqueTrades.values());
 }
 
 async function fetchCurrentPrice(derivSymbol) {
@@ -188,6 +209,29 @@ function filterReposByArgs(args) {
     upperArgs.includes(r.derivSymbol.toUpperCase())
   );
   return matches.length > 0 ? matches : REPOS;
+}
+
+// ── STRICT UTC DATE GENERATORS ──
+function getUtcRange(daysBack, isYesterday = false) {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const d = now.getUTCDate();
+
+  let start, end;
+  if (isYesterday) {
+    start = new Date(Date.UTC(y, m, d - 1, 0, 0, 0, 0));
+    end = new Date(Date.UTC(y, m, d - 1, 23, 59, 59, 999));
+  } else if (daysBack === 1) {
+    // Today
+    start = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
+    end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+  } else {
+    // e.g., daysBack = 7 (Last 7 days including today)
+    start = new Date(Date.UTC(y, m, d - daysBack + 1, 0, 0, 0, 0));
+    end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+  }
+  return { start, end };
 }
 
 // ── 1. STATUS & GROUPED PORTFOLIO HANDLER ──
@@ -266,12 +310,13 @@ async function handleSingleBot(repo) {
   const totalNetPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
   const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
 
-  const todayCutoff = new Date();
-  todayCutoff.setUTCHours(0, 0, 0, 0);
+  const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
+  
   const todayTrades = closed.filter(t => {
     const cd = parseUtcDate(t.closeTime);
-    return cd && cd >= todayCutoff;
+    return cd && cd >= todayStart && cd <= todayEnd;
   });
+  
   const todayWins = todayTrades.filter(t => t.result === "WIN").length;
   const todayLosses = todayTrades.filter(t => t.result === "LOSS").length;
   const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
@@ -321,20 +366,7 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
   const headerSuffix = isAll ? "ALL BOTS" : targetRepos.map(r => r.symbol).join(", ");
   let message = `📊 *${label} — ${headerSuffix}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
-  const startCutoff = new Date();
-  const endCutoff = new Date();
-
-  if (isYesterday) {
-    startCutoff.setDate(startCutoff.getDate() - 1);
-    startCutoff.setUTCHours(0, 0, 0, 0);
-    endCutoff.setDate(endCutoff.getDate() - 1);
-    endCutoff.setUTCHours(23, 59, 59, 999);
-  } else if (daysBack === 1) {
-    startCutoff.setUTCHours(0, 0, 0, 0);
-  } else {
-    startCutoff.setDate(startCutoff.getDate() - daysBack);
-    startCutoff.setUTCHours(0, 0, 0, 0);
-  }
+  const { start: startCutoff, end: endCutoff } = getUtcRange(daysBack, isYesterday);
 
   const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
   let grandWins = 0, grandLosses = 0, grandPnl = 0, grandTotal = 0;
@@ -344,8 +376,7 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
       if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
       const closeDate = parseUtcDate(t.closeTime);
       if (!closeDate) return false;
-      if (isYesterday) return closeDate >= startCutoff && closeDate <= endCutoff;
-      return closeDate >= startCutoff;
+      return closeDate >= startCutoff && closeDate <= endCutoff;
     });
 
     if (pt.length === 0) { 
@@ -700,9 +731,8 @@ async function handlePerformance(args) {
 
   if (numArg) {
     const days = parseInt(numArg);
-    cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - days);
-    cutoff.setUTCHours(0, 0, 0, 0);
+    const now = new Date();
+    cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days + 1, 0, 0, 0, 0));
     cutoffLabel = `Last ${days} Days`;
   }
 
