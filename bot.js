@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import WebSocket from "ws";
+import { Buffer } from "buffer";
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
@@ -91,9 +92,7 @@ async function sendTelegram(message, customKeyboard = null) {
       const plain = message.replace(/[*_`\[\]]/g, "");
       await send(plain, "");
     }
-  } catch (err) {
-    console.error("Telegram error:", err.message);
-  }
+  } catch (err) {}
 }
 
 async function sendInteractiveMenu() {
@@ -109,7 +108,7 @@ async function sendInteractiveMenu() {
     resize_keyboard: true,
     persistent: true
   };
-  await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports!`, keyboard);
+  await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant reports!`, keyboard);
 }
 
 // ── DIRECT GATEWAY BROKER PORTFOLIO FETCHER ──
@@ -123,47 +122,42 @@ async function fetchLiveBrokerPortfolio() {
       const data = await res.json();
       return data.portfolio || [];
     }
-  } catch (e) {
-    console.warn("Could not reach Gateway for live portfolio. Falling back to database history.");
-  }
+  } catch (e) {}
   return null;
 }
 
-// ── ADVANCED DEDUPLICATION & FETCH ENGINE ──
+// ── 0-LAG GITHUB API FETCHER ──
 async function fetchTradesJson(repo) {
   const headers = {
-    "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma": "no-cache",
-    "Expires": "0"
+    "Accept": "application/vnd.github.v3+json",
+    "Cache-Control": "no-cache"
   };
   if (GH_TOKEN) headers["Authorization"] = `Bearer ${GH_TOKEN}`;
 
-  const cacheBuster = `?t=${Date.now()}&r=${Math.random()}`;
   let rawTrades = [];
 
-  const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.name}/main/trades.json${cacheBuster}`;
-  try {
-    const res = await fetch(rawUrl, { headers });
-    if (res.ok) {
-      const json = await res.json();
-      if (Array.isArray(json)) rawTrades = json;
-    }
-  } catch {}
-
-  if (rawTrades.length === 0 && repo.altName) {
-    const altUrl = `https://raw.githubusercontent.com/${GH_USER}/${repo.altName}/main/trades.json${cacheBuster}`;
+  const fetchApi = async (repoName) => {
     try {
-      const res = await fetch(altUrl, { headers });
+      const url = `https://api.github.com/repos/${GH_USER}/${repoName}/contents/trades.json`;
+      const res = await fetch(url, { headers });
       if (res.ok) {
-        const json = await res.json();
-        if (Array.isArray(json)) rawTrades = json;
+        const data = await res.json();
+        if (data.content) {
+          const decoded = Buffer.from(data.content, 'base64').toString('utf8');
+          return JSON.parse(decoded);
+        }
       }
     } catch {}
-  }
+    return null;
+  };
+
+  let parsed = await fetchApi(repo.name);
+  if (!parsed && repo.altName) parsed = await fetchApi(repo.altName);
+  
+  if (Array.isArray(parsed)) rawTrades = parsed;
 
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
-    // Ignore ghost fallback losses from rate-limit interruptions
     if (!t.contractId && t.result === "LOSS") continue;
 
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
@@ -269,7 +263,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
   for (const { repo, trades, currentPrice } of allRepoData) {
     let openPositions = [];
     
-    // Cross-Reference Gateway API with trades.json to find true Entry Price
     if (Array.isArray(liveContracts)) {
       const brokerMatches = liveContracts.filter(c => {
         const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
@@ -280,7 +273,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
         openPositions.push({
           direction: localTrade ? localTrade.direction : (bc.contract_type === "MULTUP" ? "BUY" : "SELL"),
-          entry: localTrade ? localTrade.entry : null, // Prevent $5 stake calculation glitch
+          entry: localTrade ? localTrade.entry : null, 
           openTime: localTrade ? localTrade.openTime : (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
           contractId: bc.contract_id
         });
@@ -302,7 +295,10 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       for (const open of openPositions) {
         const openDate = parseUtcDate(open.openTime);
         const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-        message += `🟡 OPEN: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "N/A"}\n`;
+        
+        // Dynamic Entry Display
+        const entryStr = open.entry ? Number(open.entry).toFixed(4) : "N/A (Awaiting GitHub Sync...)";
+        message += `🟡 OPEN: *${open.direction}* @ ${entryStr}\n`;
 
         if (currentPrice !== null && open.entry) {
           const rawPnl = open.direction === "BUY"
@@ -312,7 +308,10 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
           const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
           const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
           message += `${pnlIcon} Live Floating P&L: *${pnlStr}* (@ ${currentPrice.toFixed(4)})\n`;
+        } else if (!open.entry) {
+          message += `⏳ Live Floating P&L: Awaiting entry sync...\n`;
         }
+        
         message += `⏱ Active: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
         if (open.contractId) message += `🎫 Contract: \`${open.contractId}\`\n`;
       }
@@ -320,7 +319,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
     } else {
       message += `⚪ No open trade\n`;
       
-      // Calculate today's specific trades
       const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
       const todayTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -337,7 +335,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         message += `📅 Today: No closed trades\n`;
       }
 
-      // Calculate Last 7 Days
       const { start: weekStart, end: weekEnd } = getUtcRange(7, false);
       const weekTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -394,6 +391,11 @@ async function handleSingleBot(repo) {
   }
 
   const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
+  const wins = closed.filter(t => t.result === "WIN").length;
+  const losses = closed.filter(t => t.result === "LOSS").length;
+  const winRate = closed.length ? ((wins / closed.length) * 100).toFixed(1) : 0;
+  const totalNetPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
 
   const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
   const todayTrades = closed.filter(t => {
@@ -416,7 +418,10 @@ async function handleSingleBot(repo) {
     for (const open of openTrades) {
       const openDate = parseUtcDate(open.openTime);
       const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-      msg += `• Direction: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "N/A"}\n`;
+      
+      const entryStr = open.entry ? Number(open.entry).toFixed(4) : "N/A (Awaiting GitHub Sync...)";
+      msg += `• Direction: *${open.direction}* @ ${entryStr}\n`;
+      
       if (currentPrice !== null && open.entry) {
         const rawPnl = open.direction === "BUY"
           ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
@@ -424,7 +429,10 @@ async function handleSingleBot(repo) {
         const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
         const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
         msg += `• Live Spot: ${currentPrice.toFixed(4)} | P&L: *${pnlStr}*\n`;
+      } else if (!open.entry) {
+        msg += `• Live Spot: ${currentPrice ? currentPrice.toFixed(4) : "N/A"} | P&L: ⏳ Awaiting sync...\n`;
       }
+      
       msg += `• Duration: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
       if (open.contractId) msg += `• Contract ID: \`${open.contractId}\`\n`;
     }
@@ -734,8 +742,9 @@ async function handleExposure() {
 
       totalUnrealizedPnl += pnlDollars;
       const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
-
-      message += `*${repo.label}*: ${direction} @ ${entry ? Number(entry).toFixed(4) : "N/A"}\n`;
+      
+      const entryStr = entry ? Number(entry).toFixed(4) : "N/A (Awaiting GitHub Sync)";
+      message += `*${repo.label}*: ${direction} @ ${entryStr}\n`;
       message += `• Floating P&L: *${pnlStr}* | Hard Stop: $5.00\n`;
       if (open.contract_id) message += `• Contract: \`${open.contract_id}\`\n\n`;
     }
