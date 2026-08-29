@@ -56,7 +56,7 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 *📅 Time & Range Summaries:*
 /today [sym] — Today's closed trades (00:00 UTC)
 /yesterday [sym] — Yesterday's 24h performance
-/weekly [sym] — Last 7 days summary
+/weekly [sym] — Current Week summary (Sun - Now)
 /biweekly [sym] — Last 14 days summary
 /monthly [sym] — Last 30 days summary
 /report 14 — Last 14 days report
@@ -111,7 +111,7 @@ async function sendInteractiveMenu() {
   await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant reports!`, keyboard);
 }
 
-// ── DIRECT GATEWAY BROKER PORTFOLIO FETCHER ──
+// ── DIRECT GATEWAY BROKER PORTFOLIO & CONTRACT DETAILS (0ms Live Server-Truth) ──
 async function fetchLiveBrokerPortfolio() {
   if (!GATEWAY_URL || !GATEWAY_SECRET) return null;
   try {
@@ -126,12 +126,33 @@ async function fetchLiveBrokerPortfolio() {
   return null;
 }
 
-// ── 0-LAG GITHUB API FETCHER ──
+async function fetchContractDetails(contractId) {
+  if (!GATEWAY_URL || !GATEWAY_SECRET || !contractId) return null;
+  try {
+    const res = await fetch(`${GATEWAY_URL}/proposal_open_contract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-gateway-secret": GATEWAY_SECRET },
+      body: JSON.stringify({ proposal_open_contract: 1, contract_id: contractId })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const poc = data.proposal_open_contract;
+      if (poc) {
+        return {
+          entry: parseFloat(poc.entry_spot || poc.barrier || poc.entry_tick),
+          profit: typeof poc.profit === 'number' ? poc.profit : parseFloat(poc.profit),
+          currentSpot: parseFloat(poc.current_spot || poc.bid_price),
+          dateStart: poc.date_start ? poc.date_start * 1000 : null
+        };
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+// ── 0-LAG GITHUB API FETCHER FOR HISTORICAL TRADES ──
 async function fetchTradesJson(repo) {
-  const headers = {
-    "Accept": "application/vnd.github.v3+json",
-    "Cache-Control": "no-cache"
-  };
+  const headers = { "Accept": "application/vnd.github.v3+json", "Cache-Control": "no-cache" };
   if (GH_TOKEN) headers["Authorization"] = `Bearer ${GH_TOKEN}`;
 
   let rawTrades = [];
@@ -153,7 +174,6 @@ async function fetchTradesJson(repo) {
 
   let parsed = await fetchApi(repo.name);
   if (!parsed && repo.altName) parsed = await fetchApi(repo.altName);
-  
   if (Array.isArray(parsed)) rawTrades = parsed;
 
   const uniqueTrades = new Map();
@@ -223,7 +243,7 @@ function filterReposByArgs(args) {
   return matches.length > 0 ? matches : REPOS;
 }
 
-// ── STRICT UTC DATE GENERATORS ──
+// ── STRICT UTC DATE GENERATORS (WEEK STARTS SUNDAY) ──
 function getUtcRange(daysBack, isYesterday = false) {
   const now = new Date();
   const y = now.getUTCFullYear();
@@ -244,7 +264,19 @@ function getUtcRange(daysBack, isYesterday = false) {
   return { start, end };
 }
 
-// ── 1. STATUS & GROUPED PORTFOLIO HANDLER (GATEWAY-POWERED) ──
+function getThisWeekUtcRange() {
+  const now = new Date();
+  const dayOfWeek = now.getUTCDay(); // 0 = Sunday
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const d = now.getUTCDate();
+
+  const start = new Date(Date.UTC(y, m, d - dayOfWeek, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+  return { start, end };
+}
+
+// ── 1. STATUS & GROUPED PORTFOLIO HANDLER (LIVE BROKER DATA) ──
 async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", onlyOpen = false) {
   let message = `📊 *${title}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
@@ -269,15 +301,20 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         return sym === repo.derivSymbol;
       });
       
-      brokerMatches.forEach(bc => {
+      // Fetch exact real-time broker details for every live trade
+      openPositions = await Promise.all(brokerMatches.map(async (bc) => {
+        const details = await fetchContractDetails(bc.contract_id);
         const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
-        openPositions.push({
-          direction: localTrade ? localTrade.direction : (bc.contract_type === "MULTUP" ? "BUY" : "SELL"),
-          entry: localTrade ? localTrade.entry : null, 
-          openTime: localTrade ? localTrade.openTime : (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
+        
+        return {
+          direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
+          entry: details?.entry || localTrade?.entry || null,
+          currentSpot: details?.currentSpot || currentPrice,
+          livePnl: (details && typeof details.profit === 'number') ? details.profit : null,
+          openTime: localTrade?.openTime || (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
           contractId: bc.contract_id
-        });
-      });
+        };
+      }));
     }
 
     if (openPositions.length === 0) {
@@ -296,20 +333,22 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         const openDate = parseUtcDate(open.openTime);
         const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
         
-        // Dynamic Entry Display
-        const entryStr = open.entry ? Number(open.entry).toFixed(4) : "N/A (Awaiting GitHub Sync...)";
-        message += `🟡 OPEN: *${open.direction}* @ ${entryStr}\n`;
+        message += `🟡 OPEN: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
 
-        if (currentPrice !== null && open.entry) {
+        // Direct Broker Truth Floating P&L
+        let pnlDollars = open.livePnl;
+        if (pnlDollars === null && currentPrice !== null && open.entry) {
           const rawPnl = open.direction === "BUY"
             ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
             : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
-          const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+          pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+        }
+
+        if (pnlDollars !== null) {
           const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
           const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
-          message += `${pnlIcon} Live Floating P&L: *${pnlStr}* (@ ${currentPrice.toFixed(4)})\n`;
-        } else if (!open.entry) {
-          message += `⏳ Live Floating P&L: Awaiting entry sync...\n`;
+          const spotText = open.currentSpot ? ` (@ ${open.currentSpot.toFixed(4)})` : "";
+          message += `${pnlIcon} Live Floating P&L: *${pnlStr}*${spotText}\n`;
         }
         
         message += `⏱ Active: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
@@ -319,6 +358,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
     } else {
       message += `⚪ No open trade\n`;
       
+      // Calculate today's specific trades
       const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
       const todayTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -335,7 +375,8 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         message += `📅 Today: No closed trades\n`;
       }
 
-      const { start: weekStart, end: weekEnd } = getUtcRange(7, false);
+      // Calculate This Week (Sunday Start)
+      const { start: weekStart, end: weekEnd } = getThisWeekUtcRange();
       const weekTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
         return cd && cd >= weekStart && cd <= weekEnd;
@@ -346,9 +387,9 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         const wl = weekTrades.filter(t => t.result === "LOSS").length;
         const wp = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
         const wpStr = wp >= 0 ? `+$${wp.toFixed(2)}` : `-$${Math.abs(wp).toFixed(2)}`;
-        message += `📆 Last 7 Days: ${weekTrades.length} trades | W:${ww} L:${wl} | Net: *${wpStr}*\n`;
+        message += `📆 This Week: ${weekTrades.length} trades | W:${ww} L:${wl} | Net: *${wpStr}*\n`;
       } else {
-        message += `📆 Last 7 Days: No closed trades\n`;
+        message += `📆 This Week: No closed trades\n`;
       }
       message += `\n`;
     }
@@ -375,15 +416,19 @@ async function handleSingleBot(repo) {
       const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
       return sym === repo.derivSymbol;
     });
-    matches.forEach(bc => {
+    
+    openTrades = await Promise.all(matches.map(async (bc) => {
+      const details = await fetchContractDetails(bc.contract_id);
       const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
-      openTrades.push({
-        direction: localTrade ? localTrade.direction : (bc.contract_type === "MULTUP" ? "BUY" : "SELL"),
-        entry: localTrade ? localTrade.entry : null,
-        openTime: localTrade ? localTrade.openTime : (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
+      return {
+        direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
+        entry: details?.entry || localTrade?.entry || null,
+        currentSpot: details?.currentSpot || currentPrice,
+        livePnl: (details && typeof details.profit === 'number') ? details.profit : null,
+        openTime: localTrade?.openTime || (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
         contractId: bc.contract_id
-      });
-    });
+      };
+    }));
   }
 
   if (openTrades.length === 0) {
@@ -391,11 +436,6 @@ async function handleSingleBot(repo) {
   }
 
   const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
-  const wins = closed.filter(t => t.result === "WIN").length;
-  const losses = closed.filter(t => t.result === "LOSS").length;
-  const winRate = closed.length ? ((wins / closed.length) * 100).toFixed(1) : 0;
-  const totalNetPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
-  const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
 
   const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
   const todayTrades = closed.filter(t => {
@@ -419,18 +459,20 @@ async function handleSingleBot(repo) {
       const openDate = parseUtcDate(open.openTime);
       const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
       
-      const entryStr = open.entry ? Number(open.entry).toFixed(4) : "N/A (Awaiting GitHub Sync...)";
-      msg += `• Direction: *${open.direction}* @ ${entryStr}\n`;
+      msg += `• Direction: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
       
-      if (currentPrice !== null && open.entry) {
+      let pnlDollars = open.livePnl;
+      if (pnlDollars === null && currentPrice !== null && open.entry) {
         const rawPnl = open.direction === "BUY"
           ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
           : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
-        const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+        pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
+      }
+
+      if (pnlDollars !== null) {
         const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
-        msg += `• Live Spot: ${currentPrice.toFixed(4)} | P&L: *${pnlStr}*\n`;
-      } else if (!open.entry) {
-        msg += `• Live Spot: ${currentPrice ? currentPrice.toFixed(4) : "N/A"} | P&L: ⏳ Awaiting sync...\n`;
+        const spotText = open.currentSpot ? ` (@ ${open.currentSpot.toFixed(4)})` : "";
+        msg += `• Live P&L: *${pnlStr}*${spotText}\n`;
       }
       
       msg += `• Duration: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
@@ -443,7 +485,7 @@ async function handleSingleBot(repo) {
   msg += `\n📅 *Today's Performance:*\n`;
   msg += `Trades: ${todayTrades.length} | W: ${todayWins} | L: ${todayLosses} | Net: *${todayPnlStr}*\n`;
 
-  const { start: weekStart, end: weekEnd } = getUtcRange(7, false);
+  const { start: weekStart, end: weekEnd } = getThisWeekUtcRange();
   const weekTrades = closed.filter(t => {
     const cd = parseUtcDate(t.closeTime);
     return cd && cd >= weekStart && cd <= weekEnd;
@@ -454,7 +496,7 @@ async function handleSingleBot(repo) {
   const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
   const weekPnlStr = weekPnl >= 0 ? `+$${weekPnl.toFixed(2)}` : `-$${Math.abs(weekPnl).toFixed(2)}`;
 
-  msg += `\n📆 *Last 7 Days Statistics:*\n`;
+  msg += `\n📆 *This Week's Performance (Sun-Now):*\n`;
   msg += `Trades: ${weekTrades.length} | W: ${weekWins} | L: ${weekLosses} | Net: *${weekPnlStr}*\n`;
 
   await sendTelegram(msg);
@@ -467,7 +509,8 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
   const headerSuffix = isAll ? "ALL BOTS" : targetRepos.map(r => r.symbol).join(", ");
   let message = `📊 *${label} — ${headerSuffix}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
-  const { start: startCutoff, end: endCutoff } = getUtcRange(daysBack, isYesterday);
+  // If weekly, use Sunday-to-now range
+  const { start: startCutoff, end: endCutoff } = daysBack === 7 ? getThisWeekUtcRange() : getUtcRange(daysBack, isYesterday);
 
   const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
   let grandWins = 0, grandLosses = 0, grandPnl = 0, grandTotal = 0;
@@ -726,25 +769,23 @@ async function handleExposure() {
       totalStakeDeployed += (open.buy_price || 5.00);
       totalMaxRisk += 5.00;
 
+      const details = await fetchContractDetails(open.contract_id);
       const localTrade = trades.find(t => String(t.contractId) === String(open.contract_id));
-      const entry = localTrade ? localTrade.entry : null;
+      const entry = details?.entry || localTrade?.entry || null;
       const direction = open.contract_type === "MULTUP" ? "BUY" : "SELL";
-      let pnlDollars = 0;
-
-      if (typeof open.profit === 'number') {
-        pnlDollars = open.profit;
-      } else if (currentPrice !== null && entry) {
+      
+      let pnlDollars = details?.profit ?? null;
+      if (pnlDollars === null && currentPrice !== null && entry) {
         const rawPnl = direction === "BUY"
           ? (currentPrice - entry) / entry * 5 * repo.multiplier
           : (entry - currentPrice) / entry * 5 * repo.multiplier;
         pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
       }
 
-      totalUnrealizedPnl += pnlDollars;
-      const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
-      
-      const entryStr = entry ? Number(entry).toFixed(4) : "N/A (Awaiting GitHub Sync)";
-      message += `*${repo.label}*: ${direction} @ ${entryStr}\n`;
+      if (pnlDollars !== null) totalUnrealizedPnl += pnlDollars;
+      const pnlStr = (pnlDollars !== null) ? (pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`) : "N/A";
+
+      message += `*${repo.label}*: ${direction} @ ${entry ? Number(entry).toFixed(4) : "Market Spot"}\n`;
       message += `• Floating P&L: *${pnlStr}* | Hard Stop: $5.00\n`;
       if (open.contract_id) message += `• Contract: \`${open.contract_id}\`\n\n`;
     }
@@ -949,7 +990,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Gateway-Integrated Command Center started...");
+  console.log("🤖 Zero-Delay Gateway Command Center started...");
   setInterval(checkScheduledReports, 30000);
 
   let offset = 0;
@@ -1003,7 +1044,7 @@ async function main() {
           await handleSummary(1, "Yesterday's Performance", inlineSym, true);
         } else if (command === "/weekly" || command.startsWith("/weekly_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
-          await handleSummary(7, "Weekly Summary (Last 7 Days)", inlineSym, false);
+          await handleSummary(7, "Weekly Summary (This Week: Sun-Now)", inlineSym, false);
         } else if (command === "/biweekly") {
           await handleSummary(14, "Bi-Weekly Summary (Last 14 Days)", args, false);
         } else if (command === "/monthly" || command.startsWith("/monthly_")) {
