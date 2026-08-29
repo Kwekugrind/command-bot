@@ -11,15 +11,14 @@ const GH_USER  = "Kwekugrind";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://138.2.169.72:3000";
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET;
 
-// Multipliers and commissions matched to individual bot repositories
 const REPOS = [
   { name: "Test-Bot",       altName: "test-bot", label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
   { name: "OmniSight",      altName: "omnisight", label: "OmniSight (V50 Live)", symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
   { name: "Lery-s-Alerts",  altName: "lery-s-alerts", label: "Lery's Elite (V75)",   symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
   { name: "coffee",         altName: "Coffee", label: "Coffee Machine (V75S)", symbol: "V75S", isLive: false, is1s: true,  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
-  { name: "Milk",           altName: "milk", label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
+  { name: "milk",           altName: "Milk", label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
   { name: "ice-cream",      altName: "Ice-Cream", label: "Ice Cream (V100S)", symbol: "V100S", isLive: false, is1s: true,  derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
-  { name: "Tea",            altName: "tea", label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
+  { name: "tea",            altName: "Tea", label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
 ];
 
 const PHASE_LABELS = {
@@ -152,7 +151,6 @@ async function fetchContractDetails(contractId) {
   return null;
 }
 
-// ── 3-TIER BULLETPROOF TRADES FETCHER (LOCAL DISK -> GITHUB API -> RAW GITHUB) ──
 function deduplicateTrades(rawTrades) {
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
@@ -173,7 +171,7 @@ function deduplicateTrades(rawTrades) {
 }
 
 async function fetchTradesJson(repo) {
-  // Tier 1: Try Local Hard Drive Read (0ms, 100% Reliable for Server 2 bots)
+  // Tier 1: Local Hard Drive Read (Server 2)
   const homeDir = process.env.HOME || "/home/ubuntu";
   const possiblePaths = [
     path.join(homeDir, "trading-bots", repo.name, "trades.json"),
@@ -193,7 +191,7 @@ async function fetchTradesJson(repo) {
     }
   }
 
-  // Tier 2: Fetch via GitHub REST API with Mandatory User-Agent
+  // Tier 2: GitHub API with User-Agent & Auth
   const apiHeaders = {
     "Accept": "application/vnd.github.v3+json",
     "User-Agent": "Deriv-Command-Center",
@@ -223,11 +221,11 @@ async function fetchTradesJson(repo) {
   let parsed = await fetchFromApi(repo.name);
   if (!parsed && repo.altName) parsed = await fetchFromApi(repo.altName);
 
-  // Tier 3: Fallback to Raw GitHub
+  // Tier 3: Raw GitHub Fallback
   if (!parsed) {
     const rawHeaders = { "Cache-Control": "no-cache", "User-Agent": "Deriv-Command-Center" };
     if (GH_TOKEN) rawHeaders["Authorization"] = `token ${GH_TOKEN}`;
-    const names = [repo.name, repo.altName].filter(Boolean);
+    const names = [repo.name, repo.altName, repo.name.toLowerCase()].filter(Boolean);
     for (const n of names) {
       try {
         const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${n}/main/trades.json?t=${Date.now()}`;
@@ -275,11 +273,14 @@ function formatDuration(mins) {
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
-function getTradeRealizedPnl(t) {
+// ── ACCURATE MATHEMATICAL REALIZED P&L ──
+function getTradeRealizedPnl(t, repo) {
   if (typeof t.serverPnl === 'number') return t.serverPnl;
   if (typeof t.pnl === 'number') return t.pnl;
-  if (t.result === "WIN") return parseFloat(((t.rr || 1.5) * 5.00).toFixed(2));
-  if (t.result === "LOSS") return -5.00;
+  
+  // Real target based on $3.60 Software TP / -$3.60 Software SL
+  if (t.result === "WIN") return 3.60;
+  if (t.result === "LOSS") return -3.60;
   return 0;
 }
 
@@ -418,7 +419,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       if (todayTrades.length > 0) {
         const tw = todayTrades.filter(t => t.result === "WIN").length;
         const tl = todayTrades.filter(t => t.result === "LOSS").length;
-        const tp = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+        const tp = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
         const tpStr = tp >= 0 ? `+$${tp.toFixed(2)}` : `-$${Math.abs(tp).toFixed(2)}`;
         message += `📅 Today: ${todayTrades.length} trades | W:${tw} L:${tl} | Net: *${tpStr}*\n`;
       } else {
@@ -435,7 +436,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       if (weekTrades.length > 0) {
         const ww = weekTrades.filter(t => t.result === "WIN").length;
         const wl = weekTrades.filter(t => t.result === "LOSS").length;
-        const wp = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+        const wp = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
         const wpStr = wp >= 0 ? `+$${wp.toFixed(2)}` : `-$${Math.abs(wp).toFixed(2)}`;
         message += `📆 This Week: ${weekTrades.length} trades | W:${ww} L:${wl} | Net: *${wpStr}*\n`;
       } else {
@@ -495,7 +496,7 @@ async function handleSingleBot(repo) {
   
   const todayWins = todayTrades.filter(t => t.result === "WIN").length;
   const todayLosses = todayTrades.filter(t => t.result === "LOSS").length;
-  const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
   const todayPnlStr = todayPnl >= 0 ? `+$${todayPnl.toFixed(2)}` : `-$${Math.abs(todayPnl).toFixed(2)}`;
 
   let msg = `🤖 *${repo.label} Dashboard*\n`;
@@ -543,7 +544,7 @@ async function handleSingleBot(repo) {
   
   const weekWins = weekTrades.filter(t => t.result === "WIN").length;
   const weekLosses = weekTrades.filter(t => t.result === "LOSS").length;
-  const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
   const weekPnlStr = weekPnl >= 0 ? `+$${weekPnl.toFixed(2)}` : `-$${Math.abs(weekPnl).toFixed(2)}`;
 
   msg += `\n📆 *This Week's Performance (Sun-Now):*\n`;
@@ -578,7 +579,7 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
 
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
-    const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t), 0);
+    const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
 
@@ -605,7 +606,7 @@ async function handleRanking() {
     const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
     const wins = closed.filter(t => t.result === "WIN").length;
     const losses = closed.filter(t => t.result === "LOSS").length;
-    const netPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+    const netPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
     const winRate = closed.length ? (wins / closed.length) * 100 : 0;
     return { repo, total: closed.length, wins, losses, netPnl, winRate };
   }).sort((a, b) => b.netPnl - a.netPnl);
@@ -702,7 +703,7 @@ async function handleStats(args = []) {
     let losses = 0;
 
     closed.forEach(t => {
-      const pnl = getTradeRealizedPnl(t);
+      const pnl = getTradeRealizedPnl(t, repo);
       if (pnl >= 0) {
         grossWin += pnl;
         wins++;
@@ -753,7 +754,7 @@ async function handleExtremeTrades(isBest = true) {
   let allTrades = [];
   allRepoData.forEach(({ repo, trades }) => {
     trades.filter(t => t.result && t.result !== "CANCELLED").forEach(t => {
-      allTrades.push({ ...t, repoLabel: repo.label, pnlVal: getTradeRealizedPnl(t) });
+      allTrades.push({ ...t, repoLabel: repo.label, pnlVal: getTradeRealizedPnl(t, repo) });
     });
   });
 
@@ -900,7 +901,7 @@ async function handleReport(args) {
     
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
-    const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t), 0);
+    const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
     
@@ -917,14 +918,14 @@ async function handleReport(args) {
 }
 
 // ── 10. PHASE PERFORMANCE HANDLER (/performance, /perf) ──
-function phaseStats(trades, phase) {
+function phaseStats(trades, phase, repo) {
   const pt = phase === "UNKNOWN"
     ? trades.filter(t => !t.entryType || !PHASE_LABELS[t.entryType])
     : trades.filter(t => t.entryType === phase);
   if (pt.length === 0) return null;
   const wins   = pt.filter(t => t.result === "WIN").length;
   const losses = pt.filter(t => t.result === "LOSS").length;
-  const net$   = pt.reduce((s, t) => s + getTradeRealizedPnl(t), 0);
+  const net$   = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
   const wr     = ((wins / pt.length) * 100).toFixed(1);
   return { count: pt.length, wins, losses, wr, net$ };
 }
@@ -964,7 +965,7 @@ async function handlePerformance(args) {
     message += `\n*${repo.label}*\n`;
     let hasAny = false;
     for (const phase of allPhases) {
-      const s = phaseStats(closed, phase);
+      const s = phaseStats(closed, phase, repo);
       if (!s) continue;
       hasAny = true;
       const label = phase === "UNKNOWN" 
@@ -1038,7 +1039,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 3-Tier Zero-Lag Command Center started...");
+  console.log("🤖 Accurate Math & Synchronized Command Center started...");
   setInterval(checkScheduledReports, 30000);
 
   let offset = 0;
