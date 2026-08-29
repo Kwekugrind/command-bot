@@ -1,5 +1,7 @@
 import fetch from "node-fetch";
 import WebSocket from "ws";
+import fs from "fs";
+import path from "path";
 import { Buffer } from "buffer";
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
@@ -11,13 +13,13 @@ const GATEWAY_SECRET = process.env.GATEWAY_SECRET;
 
 // Multipliers and commissions matched to individual bot repositories
 const REPOS = [
-  { name: "Test-Bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
-  { name: "OmniSight",      label: "OmniSight (V50 Live)",  symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
-  { name: "Lery-s-Alerts",  label: "Lery's Elite (V75)",    symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
+  { name: "Test-Bot",       altName: "test-bot", label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
+  { name: "OmniSight",      altName: "omnisight", label: "OmniSight (V50 Live)", symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
+  { name: "Lery-s-Alerts",  altName: "lery-s-alerts", label: "Lery's Elite (V75)",   symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
   { name: "coffee",         altName: "Coffee", label: "Coffee Machine (V75S)", symbol: "V75S", isLive: false, is1s: true,  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
-  { name: "Milk",           label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
+  { name: "Milk",           altName: "milk", label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
   { name: "ice-cream",      altName: "Ice-Cream", label: "Ice Cream (V100S)", symbol: "V100S", isLive: false, is1s: true,  derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
-  { name: "Tea",            label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
+  { name: "Tea",            altName: "tea", label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
 ];
 
 const PHASE_LABELS = {
@@ -111,7 +113,7 @@ async function sendInteractiveMenu() {
   await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant reports!`, keyboard);
 }
 
-// ── DIRECT GATEWAY BROKER PORTFOLIO & CONTRACT DETAILS (0ms Live Server-Truth) ──
+// ── DIRECT GATEWAY BROKER PORTFOLIO & CONTRACT DETAILS ──
 async function fetchLiveBrokerPortfolio() {
   if (!GATEWAY_URL || !GATEWAY_SECRET) return null;
   try {
@@ -150,32 +152,8 @@ async function fetchContractDetails(contractId) {
   return null;
 }
 
-// ── 0-LAG GITHUB API FETCHER FOR HISTORICAL TRADES ──
-async function fetchTradesJson(repo) {
-  const headers = { "Accept": "application/vnd.github.v3+json", "Cache-Control": "no-cache" };
-  if (GH_TOKEN) headers["Authorization"] = `Bearer ${GH_TOKEN}`;
-
-  let rawTrades = [];
-
-  const fetchApi = async (repoName) => {
-    try {
-      const url = `https://api.github.com/repos/${GH_USER}/${repoName}/contents/trades.json`;
-      const res = await fetch(url, { headers });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.content) {
-          const decoded = Buffer.from(data.content, 'base64').toString('utf8');
-          return JSON.parse(decoded);
-        }
-      }
-    } catch {}
-    return null;
-  };
-
-  let parsed = await fetchApi(repo.name);
-  if (!parsed && repo.altName) parsed = await fetchApi(repo.altName);
-  if (Array.isArray(parsed)) rawTrades = parsed;
-
+// ── 3-TIER BULLETPROOF TRADES FETCHER (LOCAL DISK -> GITHUB API -> RAW GITHUB) ──
+function deduplicateTrades(rawTrades) {
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
     if (!t.contractId && t.result === "LOSS") continue;
@@ -191,8 +169,81 @@ async function fetchTradesJson(repo) {
       }
     }
   }
-
   return Array.from(uniqueTrades.values());
+}
+
+async function fetchTradesJson(repo) {
+  // Tier 1: Try Local Hard Drive Read (0ms, 100% Reliable for Server 2 bots)
+  const homeDir = process.env.HOME || "/home/ubuntu";
+  const possiblePaths = [
+    path.join(homeDir, "trading-bots", repo.name, "trades.json"),
+    path.join(homeDir, "trading-bots", repo.altName || "", "trades.json"),
+    path.join(homeDir, "trading-bots", repo.name.toLowerCase(), "trades.json")
+  ];
+
+  for (const p of possiblePaths) {
+    if (p && fs.existsSync(p)) {
+      try {
+        const fileContent = fs.readFileSync(p, "utf8");
+        const parsed = JSON.parse(fileContent);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return deduplicateTrades(parsed);
+        }
+      } catch {}
+    }
+  }
+
+  // Tier 2: Fetch via GitHub REST API with Mandatory User-Agent
+  const apiHeaders = {
+    "Accept": "application/vnd.github.v3+json",
+    "User-Agent": "Deriv-Command-Center",
+    "Cache-Control": "no-cache"
+  };
+  if (GH_TOKEN) {
+    apiHeaders["Authorization"] = GH_TOKEN.startsWith("ghp_") || GH_TOKEN.startsWith("github_pat_")
+      ? `token ${GH_TOKEN}`
+      : `Bearer ${GH_TOKEN}`;
+  }
+
+  const fetchFromApi = async (name) => {
+    try {
+      const url = `https://api.github.com/repos/${GH_USER}/${name}/contents/trades.json`;
+      const res = await fetch(url, { headers: apiHeaders });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.content) {
+          const decoded = Buffer.from(data.content, "base64").toString("utf8");
+          return JSON.parse(decoded);
+        }
+      }
+    } catch {}
+    return null;
+  };
+
+  let parsed = await fetchFromApi(repo.name);
+  if (!parsed && repo.altName) parsed = await fetchFromApi(repo.altName);
+
+  // Tier 3: Fallback to Raw GitHub
+  if (!parsed) {
+    const rawHeaders = { "Cache-Control": "no-cache", "User-Agent": "Deriv-Command-Center" };
+    if (GH_TOKEN) rawHeaders["Authorization"] = `token ${GH_TOKEN}`;
+    const names = [repo.name, repo.altName].filter(Boolean);
+    for (const n of names) {
+      try {
+        const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${n}/main/trades.json?t=${Date.now()}`;
+        const res = await fetch(rawUrl, { headers: rawHeaders });
+        if (res.ok) {
+          const json = await res.json();
+          if (Array.isArray(json) && json.length > 0) {
+            parsed = json;
+            break;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return deduplicateTrades(Array.isArray(parsed) ? parsed : []);
 }
 
 async function fetchCurrentPrice(derivSymbol) {
@@ -238,6 +289,7 @@ function filterReposByArgs(args) {
   const matches = REPOS.filter(r => 
     upperArgs.includes(r.symbol.toUpperCase()) || 
     upperArgs.includes(r.name.toUpperCase()) ||
+    (r.altName && upperArgs.includes(r.altName.toUpperCase())) ||
     upperArgs.includes(r.derivSymbol.toUpperCase())
   );
   return matches.length > 0 ? matches : REPOS;
@@ -301,7 +353,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         return sym === repo.derivSymbol;
       });
       
-      // Fetch exact real-time broker details for every live trade
       openPositions = await Promise.all(brokerMatches.map(async (bc) => {
         const details = await fetchContractDetails(bc.contract_id);
         const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
@@ -335,7 +386,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         
         message += `🟡 OPEN: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
 
-        // Direct Broker Truth Floating P&L
         let pnlDollars = open.livePnl;
         if (pnlDollars === null && currentPrice !== null && open.entry) {
           const rawPnl = open.direction === "BUY"
@@ -358,7 +408,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
     } else {
       message += `⚪ No open trade\n`;
       
-      // Calculate today's specific trades
+      // Calculate today's closed trades
       const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
       const todayTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -509,7 +559,6 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
   const headerSuffix = isAll ? "ALL BOTS" : targetRepos.map(r => r.symbol).join(", ");
   let message = `📊 *${label} — ${headerSuffix}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
-  // If weekly, use Sunday-to-now range
   const { start: startCutoff, end: endCutoff } = daysBack === 7 ? getThisWeekUtcRange() : getUtcRange(daysBack, isYesterday);
 
   const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
@@ -519,8 +568,7 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
     const pt = trades.filter(t => {
       if (!t.result || t.result === "CANCELLED" || !t.closeTime) return false;
       const closeDate = parseUtcDate(t.closeTime);
-      if (!closeDate) return false;
-      return closeDate >= startCutoff && closeDate <= endCutoff;
+      return closeDate && closeDate >= startCutoff && closeDate <= endCutoff;
     });
 
     if (pt.length === 0) { 
@@ -990,7 +1038,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Zero-Delay Gateway Command Center started...");
+  console.log("🤖 3-Tier Zero-Lag Command Center started...");
   setInterval(checkScheduledReports, 30000);
 
   let offset = 0;
