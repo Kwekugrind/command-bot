@@ -5,6 +5,8 @@ const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const GH_USER  = "Kwekugrind";
+const GATEWAY_URL = process.env.GATEWAY_URL || "http://138.2.169.72:3000";
+const GATEWAY_SECRET = process.env.GATEWAY_SECRET;
 
 // Multipliers and commissions matched to individual bot repositories
 const REPOS = [
@@ -32,7 +34,7 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 /menu — Launch the 1-Tap Touch Keyboard
 
 *📊 System Overviews:*
-/status — Live status across all 7 bots
+/status — Live status across all 7 bots (Direct Broker Feed)
 /open — Only bots with active open positions
 /exposure — Real-time capital risk & live margin
 /ranking — Leaderboard ranked by net profit & win rate
@@ -112,6 +114,23 @@ async function sendInteractiveMenu() {
   await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports with zero typing!`, keyboard);
 }
 
+// ── DIRECT GATEWAY BROKER PORTFOLIO FETCHER (0ms Live Server-Truth) ──
+async function fetchLiveBrokerPortfolio() {
+  if (!GATEWAY_URL || !GATEWAY_SECRET) return null;
+  try {
+    const res = await fetch(`${GATEWAY_URL}/portfolio`, {
+      headers: { "x-gateway-secret": GATEWAY_SECRET }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.portfolio || [];
+    }
+  } catch (e) {
+    console.warn("Could not reach Gateway for live portfolio. Falling back to history.");
+  }
+  return null;
+}
+
 // ── ADVANCED DEDUPLICATION & FETCH ENGINE ──
 async function fetchTradesJson(repo) {
   const headers = {
@@ -144,13 +163,9 @@ async function fetchTradesJson(repo) {
     } catch {}
   }
 
-  // Deduplicate trades by ID or ContractId to eliminate ghost copies
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
-    // FIX: Ignore ghost fallback losses from network/rate-limit interruptions
-    if (!t.contractId && t.result === "LOSS") {
-      continue;
-    }
+    if (!t.contractId && t.result === "LOSS") continue;
 
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
     if (key) {
@@ -236,9 +251,12 @@ function getUtcRange(daysBack, isYesterday = false) {
   return { start, end };
 }
 
-// ── 1. STATUS & GROUPED PORTFOLIO HANDLER ──
+// ── 1. STATUS & GROUPED PORTFOLIO HANDLER (GATEWAY-POWERED) ──
 async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", onlyOpen = false) {
   let message = `📊 *${title}*\n🕒 ${new Date().toUTCString()}\n\n`;
+
+  // Fetch true active broker contracts directly from Gateway
+  const liveContracts = await fetchLiveBrokerPortfolio();
 
   const allRepoData = await Promise.all(targetRepos.map(async (repo) => {
     const [trades, currentPrice] = await Promise.all([
@@ -251,21 +269,42 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
   let totalActive = 0;
 
   for (const { repo, trades, currentPrice } of allRepoData) {
-    const openTrades = trades.filter(t => !t.result && !t.pending);
+    // 1. Identify live open positions from broker Gateway first
+    let openPositions = [];
+    if (Array.isArray(liveContracts)) {
+      const brokerMatches = liveContracts.filter(c => {
+        const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
+        return sym === repo.derivSymbol;
+      });
+      brokerMatches.forEach(bc => {
+        openPositions.push({
+          direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
+          entry: bc.entry_spot || bc.barrier || bc.buy_price,
+          openTime: bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null,
+          contractId: bc.contract_id
+        });
+      });
+    }
+
+    // 2. Fallback to trades.json if Gateway was unreachable
+    if (openPositions.length === 0) {
+      openPositions = trades.filter(t => !t.result && !t.pending);
+    }
+
     const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
     const wins = closed.filter(t => t.result === "WIN").length;
     const losses = closed.filter(t => t.result === "LOSS").length;
 
-    if (onlyOpen && openTrades.length === 0) continue;
+    if (onlyOpen && openPositions.length === 0) continue;
 
     message += `*${repo.label}* ${repo.isLive ? "🟢 (Live)" : "🔵 (Demo)"}\n`;
 
-    if (openTrades.length > 0) {
-      totalActive += openTrades.length;
-      for (const open of openTrades) {
+    if (openPositions.length > 0) {
+      totalActive += openPositions.length;
+      for (const open of openPositions) {
         const openDate = parseUtcDate(open.openTime);
         const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-        message += `🟡 OPEN: ${open.direction} @ ${open.entry ? open.entry.toFixed(4) : "N/A"}\n`;
+        message += `🟡 OPEN: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "N/A"}\n`;
 
         if (currentPrice !== null && open.entry) {
           const rawPnl = open.direction === "BUY"
@@ -274,9 +313,10 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
           const pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
           const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
           const pnlIcon = pnlDollars >= 0 ? "📈" : "📉";
-          message += `${pnlIcon} Unrealized P&L: *${pnlStr}* (@ ${currentPrice.toFixed(4)})\n`;
+          message += `${pnlIcon} Live Floating P&L: *${pnlStr}* (@ ${currentPrice.toFixed(4)})\n`;
         }
         message += `⏱ Active: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
+        if (open.contractId) message += `🎫 Contract: \`${open.contractId}\`\n`;
       }
       message += `\n`;
     } else {
@@ -299,12 +339,32 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
 
 // ── 2. SINGLE BOT DEDICATED DASHBOARD ──
 async function handleSingleBot(repo) {
+  const liveContracts = await fetchLiveBrokerPortfolio();
   const [trades, currentPrice] = await Promise.all([
     fetchTradesJson(repo),
     fetchCurrentPrice(repo.derivSymbol)
   ]);
 
-  const openTrades = trades.filter(t => !t.result && !t.pending);
+  let openTrades = [];
+  if (Array.isArray(liveContracts)) {
+    const matches = liveContracts.filter(c => {
+      const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
+      return sym === repo.derivSymbol;
+    });
+    matches.forEach(bc => {
+      openTrades.push({
+        direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
+        entry: bc.entry_spot || bc.barrier || bc.buy_price,
+        openTime: bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null,
+        contractId: bc.contract_id
+      });
+    });
+  }
+
+  if (openTrades.length === 0) {
+    openTrades = trades.filter(t => !t.result && !t.pending);
+  }
+
   const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
   const wins = closed.filter(t => t.result === "WIN").length;
   const losses = closed.filter(t => t.result === "LOSS").length;
@@ -313,7 +373,6 @@ async function handleSingleBot(repo) {
   const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
 
   const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
-  
   const todayTrades = closed.filter(t => {
     const cd = parseUtcDate(t.closeTime);
     return cd && cd >= todayStart && cd <= todayEnd;
@@ -330,13 +389,11 @@ async function handleSingleBot(repo) {
   msg += `━━━━━━━━━━━━━━━━━━━━\n`;
 
   if (openTrades.length > 0) {
-    msg += `📍 *Active Position:*\n`;
+    msg += `📍 *Active Position (Direct Broker Feed):*\n`;
     for (const open of openTrades) {
       const openDate = parseUtcDate(open.openTime);
       const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-      msg += `• Direction: *${open.direction}* @ ${open.entry ? open.entry.toFixed(4) : "N/A"}\n`;
-      msg += `• Stop Loss: ${open.sl ? open.sl.toFixed(4) : "N/A"}\n`;
-      msg += `• Target TP1: ${open.tp1 ? open.tp1.toFixed(4) : "N/A"}\n`;
+      msg += `• Direction: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "N/A"}\n`;
       if (currentPrice !== null && open.entry) {
         const rawPnl = open.direction === "BUY"
           ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
@@ -346,6 +403,7 @@ async function handleSingleBot(repo) {
         msg += `• Live Spot: ${currentPrice.toFixed(4)} | P&L: *${pnlStr}*\n`;
       }
       msg += `• Duration: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
+      if (open.contractId) msg += `• Contract ID: \`${open.contractId}\`\n`;
     }
   } else {
     msg += `⚪ *Active Position:* None (Scanning market)\n`;
@@ -583,7 +641,7 @@ async function handleExtremeTrades(isBest = true) {
       const icon = isBest ? "🚀" : "🛑";
       const pnlSign = t.pnlVal >= 0 ? `+$${t.pnlVal.toFixed(2)}` : `-$${Math.abs(t.pnlVal).toFixed(2)}`;
       message += `*#${idx + 1} — ${t.repoLabel}* ${icon}\n`;
-      message += `💰 P&L: *${pnlSign}* | ${t.direction} @ ${t.entry ? t.entry.toFixed(4) : "N/A"}\n`;
+      message += `💰 P&L: *${pnlSign}* | ${t.direction} @ ${t.entry ? Number(t.entry).toFixed(4) : "N/A"}\n`;
       message += `⚡ Setup: ${phase}\n`;
       message += `📅 Closed: \`${t.closeTime || t.openTime || "N/A"}\`\n\n`;
     });
@@ -592,17 +650,16 @@ async function handleExtremeTrades(isBest = true) {
   await sendTelegram(message);
 }
 
-// ── 8. RISK & LIVE EXPOSURE METER (/exposure) ──
+// ── 8. RISK & LIVE EXPOSURE METER (DIRECT BROKER FEED) ──
 async function handleExposure() {
   let message = `🛡️ *PORTFOLIO RISK & LIVE EXPOSURE*\n🕒 ${new Date().toUTCString()}\n`;
   message += `━━━━━━━━━━━━━━━━━━━━\n\n`;
 
+  const liveContracts = await fetchLiveBrokerPortfolio();
+
   const allRepoData = await Promise.all(REPOS.map(async (repo) => {
-    const [trades, currentPrice] = await Promise.all([
-      fetchTradesJson(repo),
-      fetchCurrentPrice(repo.derivSymbol)
-    ]);
-    return { repo, trades, currentPrice };
+    const currentPrice = await fetchCurrentPrice(repo.derivSymbol);
+    return { repo, currentPrice };
   }));
 
   let totalActiveContracts = 0;
@@ -610,27 +667,39 @@ async function handleExposure() {
   let totalUnrealizedPnl = 0;
   let totalMaxRisk = 0;
 
-  for (const { repo, trades, currentPrice } of allRepoData) {
-    const openTrades = trades.filter(t => !t.result && !t.pending);
-    if (openTrades.length === 0) continue;
+  for (const { repo, currentPrice } of allRepoData) {
+    if (!Array.isArray(liveContracts)) continue;
+    const matches = liveContracts.filter(c => {
+      const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
+      return sym === repo.derivSymbol;
+    });
 
-    for (const open of openTrades) {
+    if (matches.length === 0) continue;
+
+    for (const open of matches) {
       totalActiveContracts++;
-      totalStakeDeployed += 5.00;
-      totalMaxRisk += (open.brokerSlAmount || 5.00);
+      totalStakeDeployed += (open.buy_price || 5.00);
+      totalMaxRisk += 5.00;
 
+      const entry = open.entry_spot || open.barrier || open.buy_price;
+      const direction = open.contract_type === "MULTUP" ? "BUY" : "SELL";
       let pnlDollars = 0;
-      if (currentPrice !== null && open.entry) {
-        const rawPnl = open.direction === "BUY"
-          ? (currentPrice - open.entry) / open.entry * 5 * repo.multiplier
-          : (open.entry - currentPrice) / open.entry * 5 * repo.multiplier;
+
+      if (typeof open.profit === 'number') {
+        pnlDollars = open.profit;
+      } else if (currentPrice !== null && entry) {
+        const rawPnl = direction === "BUY"
+          ? (currentPrice - entry) / entry * 5 * repo.multiplier
+          : (entry - currentPrice) / entry * 5 * repo.multiplier;
         pnlDollars = parseFloat((rawPnl - repo.commission).toFixed(2));
-        totalUnrealizedPnl += pnlDollars;
       }
 
+      totalUnrealizedPnl += pnlDollars;
       const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
-      message += `*${repo.label}*: ${open.direction} @ ${open.entry?.toFixed(4) || "N/A"}\n`;
-      message += `• Current P&L: *${pnlStr}* | Hard Stop: $${open.brokerSlAmount ? open.brokerSlAmount.toFixed(2) : "5.00"}\n\n`;
+
+      message += `*${repo.label}*: ${direction} @ ${entry ? Number(entry).toFixed(4) : "N/A"}\n`;
+      message += `• Floating P&L: *${pnlStr}* | Hard Stop: $5.00\n`;
+      if (open.contract_id) message += `• Contract: \`${open.contract_id}\`\n\n`;
     }
   }
 
@@ -803,30 +872,27 @@ function checkScheduledReports() {
   const now = new Date();
   const utcHours = now.getUTCHours();
   const utcMins = now.getUTCMinutes();
-  const utcDay = now.getUTCDay(); // 0 is Sunday
+  const utcDay = now.getUTCDay();
   const utcDate = now.getUTCDate();
   const dateKey = now.toISOString().slice(0, 10);
 
-  // 1. Daily Report at exactly 00:00 UTC (summarizes yesterday)
   if (utcHours === 0 && utcMins === 0 && lastReportSent.daily !== dateKey) {
     lastReportSent.daily = dateKey;
     handleSummary(1, "📅 Automated Daily Performance Summary", [], true);
   }
 
-  // 2. Weekly Report every Sunday at 00:05 UTC (summarizes last 7 days)
   if (utcDay === 0 && utcHours === 0 && utcMins === 5 && lastReportSent.weekly !== dateKey) {
     lastReportSent.weekly = dateKey;
     handleSummary(7, "📊 Automated Weekly Portfolio Summary", [], false);
   }
 
-  // 3. Monthly Report on 1st of every month at 00:10 UTC (summarizes last 30 days)
   if (utcDate === 1 && utcHours === 0 && utcMins === 10 && lastReportSent.monthly !== dateKey) {
     lastReportSent.monthly = dateKey;
     handleSummary(30, "🏆 Automated Monthly Portfolio Summary", [], false);
   }
 }
 
-// ── 12. MAIN DISPATCH & POLLING LOOP ──
+// ── 12. MAIN DISPATCH LOOP ──
 async function getUpdates(offset) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
@@ -836,9 +902,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Multi-Repo Command Center & Automated Reporter started...");
-  
-  // Start the background cron checker (checks every 30 seconds)
+  console.log("🤖 Gateway-Integrated Command Center started...");
   setInterval(checkScheduledReports, 30000);
 
   let offset = 0;
@@ -854,16 +918,12 @@ async function main() {
         const args = parts.slice(1);
         console.log(`💬 Command received: ${raw}`);
 
-        // Interactive Button Menu
         if (command === "/menu" || command === "/start") {
           await sendInteractiveMenu();
-        }
-
-        // Status & Views
-        else if (command === "/status") {
-          await handleStatus(filterReposByArgs(args), "BOT STATUS REPORT", false);
+        } else if (command === "/status") {
+          await handleStatus(filterReposByArgs(args), "BOT STATUS REPORT (DIRECT BROKER FEED)", false);
         } else if (command === "/open") {
-          await handleStatus(REPOS, "ACTIVE OPEN TRADES", true);
+          await handleStatus(REPOS, "ACTIVE OPEN TRADES (DIRECT BROKER FEED)", true);
         } else if (command === "/exposure" || command === "/risk" || command === "/summary") {
           await handleExposure();
         } else if (command === "/ranking" || command === "/leaderboard") {
@@ -876,10 +936,7 @@ async function main() {
           await handleExtremeTrades(true);
         } else if (command === "/worst") {
           await handleExtremeTrades(false);
-        }
-
-        // Group Filters
-        else if (command === "/live") {
+        } else if (command === "/live") {
           await handleStatus(REPOS.filter(r => r.isLive), "LIVE ACCOUNTS PORTFOLIO (V10 + V50)", false);
         } else if (command === "/demo") {
           await handleStatus(REPOS.filter(r => !r.isLive), "DEMO ACCOUNTS PORTFOLIO (5 BOTS)", false);
@@ -887,17 +944,11 @@ async function main() {
           await handleStatus(REPOS.filter(r => r.is1s), "1-SECOND HIGH-FREQUENCY INDICES (V75S + V100S)", false);
         } else if (command === "/standard") {
           await handleStatus(REPOS.filter(r => !r.is1s), "STANDARD VOLATILITY INDICES", false);
-        }
-
-        // Single Bot Shortcuts (/v10, /v50, /v75, etc.)
-        else if (["/v10", "/v50", "/v75", "/v75s", "/v100", "/v100s", "/v25"].includes(command)) {
+        } else if (["/v10", "/v50", "/v75", "/v75s", "/v100", "/v100s", "/v25"].includes(command)) {
           const sym = command.replace("/", "").toUpperCase();
           const target = REPOS.find(r => r.symbol.toUpperCase() === sym);
           if (target) await handleSingleBot(target);
-        }
-
-        // Time Summaries with Inline Shortcuts (/today_v75, /weekly_v10, etc.)
-        else if (command === "/today" || command === "/daily" || command.startsWith("/today_") || command.startsWith("/daily_")) {
+        } else if (command === "/today" || command === "/daily" || command.startsWith("/today_") || command.startsWith("/daily_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
           await handleSummary(1, "Daily Summary (Today)", inlineSym, false);
         } else if (command === "/yesterday" || command.startsWith("/yesterday_")) {
@@ -911,10 +962,7 @@ async function main() {
         } else if (command === "/monthly" || command.startsWith("/monthly_")) {
           const inlineSym = command.includes("_") ? [command.split("_")[1]] : args;
           await handleSummary(30, "Monthly Summary (Last 30 Days)", inlineSym, false);
-        }
-
-        // Custom Reports & Performance Shortcuts
-        else if (command.startsWith("/report")) {
+        } else if (command.startsWith("/report")) {
           await handleReport(args);
         } else if (command === "/perf_today") {
           await handlePerformance(["1"]);
@@ -927,8 +975,6 @@ async function main() {
           await handlePerformance([sym]);
         } else if (command.startsWith("/performance") || command.startsWith("/perf")) {
           await handlePerformance(args);
-        } else if (command === "/help") {
-          await sendTelegram(HELP_MANUAL);
         } else {
           await sendTelegram(HELP_MANUAL);
         }
