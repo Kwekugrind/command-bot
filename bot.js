@@ -2,12 +2,9 @@ import fetch from "node-fetch";
 import WebSocket from "ws";
 import fs from "fs";
 import path from "path";
-import { Buffer } from "buffer";
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
-const GH_TOKEN = process.env.GH_TOKEN;
-const GH_USER  = "Kwekugrind";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://138.2.169.72:3000";
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET;
 
@@ -170,8 +167,9 @@ function deduplicateTrades(rawTrades) {
   return Array.from(uniqueTrades.values());
 }
 
+// ── DIRECT LOCAL + GATEWAY TRADES FETCHER (0ms Lag, No GitHub Dependency) ──
 async function fetchTradesJson(repo) {
-  // Tier 1: Local Hard Drive Read (Server 2)
+  // 1. Check Server 2 Local Hard Drive
   const homeDir = process.env.HOME || "/home/ubuntu";
   const possiblePaths = [
     path.join(homeDir, "trading-bots", repo.name, "trades.json"),
@@ -191,57 +189,25 @@ async function fetchTradesJson(repo) {
     }
   }
 
-  // Tier 2: GitHub API with User-Agent & Auth
-  const apiHeaders = {
-    "Accept": "application/vnd.github.v3+json",
-    "User-Agent": "Deriv-Command-Center",
-    "Cache-Control": "no-cache"
-  };
-  if (GH_TOKEN) {
-    apiHeaders["Authorization"] = GH_TOKEN.startsWith("ghp_") || GH_TOKEN.startsWith("github_pat_")
-      ? `token ${GH_TOKEN}`
-      : `Bearer ${GH_TOKEN}`;
-  }
-
-  const fetchFromApi = async (name) => {
-    try {
-      const url = `https://api.github.com/repos/${GH_USER}/${name}/contents/trades.json`;
-      const res = await fetch(url, { headers: apiHeaders });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.content) {
-          const decoded = Buffer.from(data.content, "base64").toString("utf8");
-          return JSON.parse(decoded);
-        }
-      }
-    } catch {}
-    return null;
-  };
-
-  let parsed = await fetchFromApi(repo.name);
-  if (!parsed && repo.altName) parsed = await fetchFromApi(repo.altName);
-
-  // Tier 3: Raw GitHub Fallback
-  if (!parsed) {
-    const rawHeaders = { "Cache-Control": "no-cache", "User-Agent": "Deriv-Command-Center" };
-    if (GH_TOKEN) rawHeaders["Authorization"] = `token ${GH_TOKEN}`;
-    const names = [repo.name, repo.altName, repo.name.toLowerCase()].filter(Boolean);
-    for (const n of names) {
+  // 2. Fetch directly from Server 1 Gateway via HTTP
+  if (GATEWAY_URL && GATEWAY_SECRET) {
+    const namesToTry = [repo.name, repo.altName, repo.name.toLowerCase()].filter(Boolean);
+    for (const n of namesToTry) {
       try {
-        const rawUrl = `https://raw.githubusercontent.com/${GH_USER}/${n}/main/trades.json?t=${Date.now()}`;
-        const res = await fetch(rawUrl, { headers: rawHeaders });
+        const res = await fetch(`${GATEWAY_URL}/trades/${n}`, {
+          headers: { "x-gateway-secret": GATEWAY_SECRET }
+        });
         if (res.ok) {
-          const json = await res.json();
-          if (Array.isArray(json) && json.length > 0) {
-            parsed = json;
-            break;
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            return deduplicateTrades(data);
           }
         }
       } catch {}
     }
   }
 
-  return deduplicateTrades(Array.isArray(parsed) ? parsed : []);
+  return [];
 }
 
 async function fetchCurrentPrice(derivSymbol) {
@@ -273,12 +239,10 @@ function formatDuration(mins) {
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
-// ── ACCURATE MATHEMATICAL REALIZED P&L ──
+// Real realized P&L based on exact $3.60 Software TP / -$3.60 Software SL
 function getTradeRealizedPnl(t, repo) {
   if (typeof t.serverPnl === 'number') return t.serverPnl;
   if (typeof t.pnl === 'number') return t.pnl;
-  
-  // Real target based on $3.60 Software TP / -$3.60 Software SL
   if (t.result === "WIN") return 3.60;
   if (t.result === "LOSS") return -3.60;
   return 0;
@@ -905,7 +869,7 @@ async function handleReport(args) {
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
     
-    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}%\nNet: *${netStr}*\n\n`;
+    message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
 
@@ -1039,7 +1003,7 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Accurate Math & Synchronized Command Center started...");
+  console.log("🤖 Direct Machine-to-Machine Command Center started...");
   setInterval(checkScheduledReports, 30000);
 
   let offset = 0;
