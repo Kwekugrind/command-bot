@@ -126,7 +126,7 @@ async function fetchLiveBrokerPortfolio() {
       return data.portfolio || [];
     }
   } catch (e) {
-    console.warn("Could not reach Gateway for live portfolio. Falling back to history.");
+    console.warn("Could not reach Gateway for live portfolio. Falling back to database history.");
   }
   return null;
 }
@@ -165,7 +165,10 @@ async function fetchTradesJson(repo) {
 
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
-    if (!t.contractId && t.result === "LOSS") continue;
+    // FIX: Ignore ghost fallback losses from network/rate-limit interruptions
+    if (!t.contractId && t.result === "LOSS") {
+      continue;
+    }
 
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
     if (key) {
@@ -255,7 +258,7 @@ function getUtcRange(daysBack, isYesterday = false) {
 async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", onlyOpen = false) {
   let message = `📊 *${title}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
-  // Fetch true active broker contracts directly from Gateway
+  // 1. Fetch live active broker contracts directly from Gateway
   const liveContracts = await fetchLiveBrokerPortfolio();
 
   const allRepoData = await Promise.all(targetRepos.map(async (repo) => {
@@ -269,7 +272,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
   let totalActive = 0;
 
   for (const { repo, trades, currentPrice } of allRepoData) {
-    // 1. Identify live open positions from broker Gateway first
     let openPositions = [];
     if (Array.isArray(liveContracts)) {
       const brokerMatches = liveContracts.filter(c => {
@@ -286,7 +288,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       });
     }
 
-    // 2. Fallback to trades.json if Gateway was unreachable
     if (openPositions.length === 0) {
       openPositions = trades.filter(t => !t.result && !t.pending);
     }
@@ -321,10 +322,28 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       message += `\n`;
     } else {
       message += `⚪ No open trade\n`;
+      
+      // Calculate today's specific trades
+      const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
+      const todayTrades = closed.filter(t => {
+        const cd = parseUtcDate(t.closeTime);
+        return cd && cd >= todayStart && cd <= todayEnd;
+      });
+      
+      if (todayTrades.length > 0) {
+        const tw = todayTrades.filter(t => t.result === "WIN").length;
+        const tl = todayTrades.filter(t => t.result === "LOSS").length;
+        const tp = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+        const tpStr = tp >= 0 ? `+$${tp.toFixed(2)}` : `-$${Math.abs(tp).toFixed(2)}`;
+        message += `📅 Today: ${todayTrades.length} trades | W:${tw} L:${tl} | Net: *${tpStr}*\n`;
+      } else {
+        message += `📅 Today: No closed trades\n`;
+      }
+
       if (closed.length > 0) {
         const totalPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
         const pnlStr = totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`;
-        message += `Closed: ${closed.length} | W: ${wins} | L: ${losses} | Net: ${pnlStr}\n`;
+        message += `📈 All-Time: ${closed.length} closed | W:${wins} L:${losses} | Net: ${pnlStr}\n`;
       }
       message += `\n`;
     }
@@ -892,7 +911,7 @@ function checkScheduledReports() {
   }
 }
 
-// ── 12. MAIN DISPATCH LOOP ──
+// ── 12. MAIN DISPATCH & POLLING LOOP ──
 async function getUpdates(offset) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
