@@ -147,7 +147,7 @@ async function fetchTradesJson(repo) {
   // Deduplicate trades by ID or ContractId to eliminate ghost copies
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
-    // FIX: Filter out ghost fallback losses that never received a Deriv contract ID
+    // FIX: Ignore ghost fallback losses from network/rate-limit interruptions
     if (!t.contractId && t.result === "LOSS") {
       continue;
     }
@@ -158,7 +158,6 @@ async function fetchTradesJson(repo) {
       if (!existing) {
         uniqueTrades.set(key, t);
       } else {
-        // Keep the most finalized version of the trade
         if (!existing.result && t.result) uniqueTrades.set(key, t);
         else if (!existing.closeTime && t.closeTime) uniqueTrades.set(key, t);
       }
@@ -797,7 +796,37 @@ async function handlePerformance(args) {
   await sendTelegram(message);
 }
 
-// ── 11. MAIN DISPATCH LOOP ──
+// ── 11. AUTOMATED PERIODIC REPORT SCHEDULER ──
+let lastReportSent = { daily: null, weekly: null, monthly: null };
+
+function checkScheduledReports() {
+  const now = new Date();
+  const utcHours = now.getUTCHours();
+  const utcMins = now.getUTCMinutes();
+  const utcDay = now.getUTCDay(); // 0 is Sunday
+  const utcDate = now.getUTCDate();
+  const dateKey = now.toISOString().slice(0, 10);
+
+  // 1. Daily Report at exactly 00:00 UTC (summarizes yesterday)
+  if (utcHours === 0 && utcMins === 0 && lastReportSent.daily !== dateKey) {
+    lastReportSent.daily = dateKey;
+    handleSummary(1, "📅 Automated Daily Performance Summary", [], true);
+  }
+
+  // 2. Weekly Report every Sunday at 00:05 UTC (summarizes last 7 days)
+  if (utcDay === 0 && utcHours === 0 && utcMins === 5 && lastReportSent.weekly !== dateKey) {
+    lastReportSent.weekly = dateKey;
+    handleSummary(7, "📊 Automated Weekly Portfolio Summary", [], false);
+  }
+
+  // 3. Monthly Report on 1st of every month at 00:10 UTC (summarizes last 30 days)
+  if (utcDate === 1 && utcHours === 0 && utcMins === 10 && lastReportSent.monthly !== dateKey) {
+    lastReportSent.monthly = dateKey;
+    handleSummary(30, "🏆 Automated Monthly Portfolio Summary", [], false);
+  }
+}
+
+// ── 12. MAIN DISPATCH & POLLING LOOP ──
 async function getUpdates(offset) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
@@ -807,7 +836,11 @@ async function getUpdates(offset) {
 }
 
 async function main() {
-  console.log("🤖 Multi-Repo Command Center started...");
+  console.log("🤖 Multi-Repo Command Center & Automated Reporter started...");
+  
+  // Start the background cron checker (checks every 30 seconds)
+  setInterval(checkScheduledReports, 30000);
+
   let offset = 0;
   while (true) {
     try {
