@@ -147,6 +147,11 @@ async function fetchTradesJson(repo) {
   // Deduplicate trades by ID or ContractId to eliminate ghost copies
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
+    // FIX: Filter out ghost fallback losses that never received a Deriv contract ID
+    if (!t.contractId && t.result === "LOSS") {
+      continue;
+    }
+
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
     if (key) {
       const existing = uniqueTrades.get(key);
@@ -223,11 +228,9 @@ function getUtcRange(daysBack, isYesterday = false) {
     start = new Date(Date.UTC(y, m, d - 1, 0, 0, 0, 0));
     end = new Date(Date.UTC(y, m, d - 1, 23, 59, 59, 999));
   } else if (daysBack === 1) {
-    // Today
     start = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
     end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
   } else {
-    // e.g., daysBack = 7 (Last 7 days including today)
     start = new Date(Date.UTC(y, m, d - daysBack + 1, 0, 0, 0, 0));
     end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
   }
