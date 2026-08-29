@@ -34,7 +34,7 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 /menu — Launch the 1-Tap Touch Keyboard
 
 *📊 System Overviews:*
-/status — Live status across all 7 bots (Direct Broker Feed)
+/status — Live status across all bots (Direct Broker Feed)
 /open — Only bots with active open positions
 /exposure — Real-time capital risk & live margin
 /ranking — Leaderboard ranked by net profit & win rate
@@ -59,7 +59,6 @@ const HELP_MANUAL = `🎛️ *COMMAND CENTER TERMINAL MANUAL*
 /biweekly [sym] — Last 14 days summary
 /monthly [sym] — Last 30 days summary
 /report 14 — Last 14 days report
-/report 2026-08-01 2026-08-20 V75 — Custom range
 
 *🔬 Strategy Analytics:*
 /performance [days] [sym] — Win rate by Phase setup`;
@@ -89,7 +88,6 @@ async function sendTelegram(message, customKeyboard = null) {
   try {
     const data = await send(message, "Markdown");
     if (!data.ok) {
-      console.error(`Telegram Markdown rejected (${data.error_code || data.error || 'unknown'}): ${data.description || JSON.stringify(data)}`);
       const plain = message.replace(/[*_`\[\]]/g, "");
       await send(plain, "");
     }
@@ -111,10 +109,10 @@ async function sendInteractiveMenu() {
     resize_keyboard: true,
     persistent: true
   };
-  await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports with zero typing!`, keyboard);
+  await sendTelegram(`🎛️ *Interactive Dashboard Keyboard Active*\n\nTap any button below for instant 1-touch reports!`, keyboard);
 }
 
-// ── DIRECT GATEWAY BROKER PORTFOLIO FETCHER (0ms Live Server-Truth) ──
+// ── DIRECT GATEWAY BROKER PORTFOLIO FETCHER ──
 async function fetchLiveBrokerPortfolio() {
   if (!GATEWAY_URL || !GATEWAY_SECRET) return null;
   try {
@@ -165,10 +163,8 @@ async function fetchTradesJson(repo) {
 
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
-    // FIX: Ignore ghost fallback losses from network/rate-limit interruptions
-    if (!t.contractId && t.result === "LOSS") {
-      continue;
-    }
+    // Ignore ghost fallback losses from rate-limit interruptions
+    if (!t.contractId && t.result === "LOSS") continue;
 
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
     if (key) {
@@ -258,7 +254,6 @@ function getUtcRange(daysBack, isYesterday = false) {
 async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", onlyOpen = false) {
   let message = `📊 *${title}*\n🕒 ${new Date().toUTCString()}\n\n`;
 
-  // 1. Fetch live active broker contracts directly from Gateway
   const liveContracts = await fetchLiveBrokerPortfolio();
 
   const allRepoData = await Promise.all(targetRepos.map(async (repo) => {
@@ -273,16 +268,20 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
 
   for (const { repo, trades, currentPrice } of allRepoData) {
     let openPositions = [];
+    
+    // Cross-Reference Gateway API with trades.json to find true Entry Price
     if (Array.isArray(liveContracts)) {
       const brokerMatches = liveContracts.filter(c => {
         const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
         return sym === repo.derivSymbol;
       });
+      
       brokerMatches.forEach(bc => {
+        const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
         openPositions.push({
-          direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
-          entry: bc.entry_spot || bc.barrier || bc.buy_price,
-          openTime: bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null,
+          direction: localTrade ? localTrade.direction : (bc.contract_type === "MULTUP" ? "BUY" : "SELL"),
+          entry: localTrade ? localTrade.entry : null, // Prevent $5 stake calculation glitch
+          openTime: localTrade ? localTrade.openTime : (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
           contractId: bc.contract_id
         });
       });
@@ -293,8 +292,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
     }
 
     const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
-    const wins = closed.filter(t => t.result === "WIN").length;
-    const losses = closed.filter(t => t.result === "LOSS").length;
 
     if (onlyOpen && openPositions.length === 0) continue;
 
@@ -340,10 +337,21 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         message += `📅 Today: No closed trades\n`;
       }
 
-      if (closed.length > 0) {
-        const totalPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
-        const pnlStr = totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`;
-        message += `📈 All-Time: ${closed.length} closed | W:${wins} L:${losses} | Net: ${pnlStr}\n`;
+      // Calculate Last 7 Days
+      const { start: weekStart, end: weekEnd } = getUtcRange(7, false);
+      const weekTrades = closed.filter(t => {
+        const cd = parseUtcDate(t.closeTime);
+        return cd && cd >= weekStart && cd <= weekEnd;
+      });
+
+      if (weekTrades.length > 0) {
+        const ww = weekTrades.filter(t => t.result === "WIN").length;
+        const wl = weekTrades.filter(t => t.result === "LOSS").length;
+        const wp = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+        const wpStr = wp >= 0 ? `+$${wp.toFixed(2)}` : `-$${Math.abs(wp).toFixed(2)}`;
+        message += `📆 Last 7 Days: ${weekTrades.length} trades | W:${ww} L:${wl} | Net: *${wpStr}*\n`;
+      } else {
+        message += `📆 Last 7 Days: No closed trades\n`;
       }
       message += `\n`;
     }
@@ -371,10 +379,11 @@ async function handleSingleBot(repo) {
       return sym === repo.derivSymbol;
     });
     matches.forEach(bc => {
+      const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
       openTrades.push({
-        direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
-        entry: bc.entry_spot || bc.barrier || bc.buy_price,
-        openTime: bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null,
+        direction: localTrade ? localTrade.direction : (bc.contract_type === "MULTUP" ? "BUY" : "SELL"),
+        entry: localTrade ? localTrade.entry : null,
+        openTime: localTrade ? localTrade.openTime : (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
         contractId: bc.contract_id
       });
     });
@@ -385,11 +394,6 @@ async function handleSingleBot(repo) {
   }
 
   const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
-  const wins = closed.filter(t => t.result === "WIN").length;
-  const losses = closed.filter(t => t.result === "LOSS").length;
-  const winRate = closed.length ? ((wins / closed.length) * 100).toFixed(1) : 0;
-  const totalNetPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
-  const totalPnlStr = totalNetPnl >= 0 ? `+$${totalNetPnl.toFixed(2)}` : `-$${Math.abs(totalNetPnl).toFixed(2)}`;
 
   const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
   const todayTrades = closed.filter(t => {
@@ -431,9 +435,19 @@ async function handleSingleBot(repo) {
   msg += `\n📅 *Today's Performance:*\n`;
   msg += `Trades: ${todayTrades.length} | W: ${todayWins} | L: ${todayLosses} | Net: *${todayPnlStr}*\n`;
 
-  msg += `\n📈 *All-Time Statistics:*\n`;
-  msg += `Total Closed: ${closed.length} | Win Rate: *${winRate}%*\n`;
-  msg += `Total Realized P&L: *${totalPnlStr}*\n`;
+  const { start: weekStart, end: weekEnd } = getUtcRange(7, false);
+  const weekTrades = closed.filter(t => {
+    const cd = parseUtcDate(t.closeTime);
+    return cd && cd >= weekStart && cd <= weekEnd;
+  });
+  
+  const weekWins = weekTrades.filter(t => t.result === "WIN").length;
+  const weekLosses = weekTrades.filter(t => t.result === "LOSS").length;
+  const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t), 0);
+  const weekPnlStr = weekPnl >= 0 ? `+$${weekPnl.toFixed(2)}` : `-$${Math.abs(weekPnl).toFixed(2)}`;
+
+  msg += `\n📆 *Last 7 Days Statistics:*\n`;
+  msg += `Trades: ${weekTrades.length} | W: ${weekWins} | L: ${weekLosses} | Net: *${weekPnlStr}*\n`;
 
   await sendTelegram(msg);
 }
@@ -677,8 +691,11 @@ async function handleExposure() {
   const liveContracts = await fetchLiveBrokerPortfolio();
 
   const allRepoData = await Promise.all(REPOS.map(async (repo) => {
-    const currentPrice = await fetchCurrentPrice(repo.derivSymbol);
-    return { repo, currentPrice };
+    const [trades, currentPrice] = await Promise.all([
+      fetchTradesJson(repo),
+      fetchCurrentPrice(repo.derivSymbol)
+    ]);
+    return { repo, trades, currentPrice };
   }));
 
   let totalActiveContracts = 0;
@@ -686,8 +703,9 @@ async function handleExposure() {
   let totalUnrealizedPnl = 0;
   let totalMaxRisk = 0;
 
-  for (const { repo, currentPrice } of allRepoData) {
+  for (const { repo, trades, currentPrice } of allRepoData) {
     if (!Array.isArray(liveContracts)) continue;
+    
     const matches = liveContracts.filter(c => {
       const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
       return sym === repo.derivSymbol;
@@ -700,7 +718,8 @@ async function handleExposure() {
       totalStakeDeployed += (open.buy_price || 5.00);
       totalMaxRisk += 5.00;
 
-      const entry = open.entry_spot || open.barrier || open.buy_price;
+      const localTrade = trades.find(t => String(t.contractId) === String(open.contract_id));
+      const entry = localTrade ? localTrade.entry : null;
       const direction = open.contract_type === "MULTUP" ? "BUY" : "SELL";
       let pnlDollars = 0;
 
@@ -911,7 +930,7 @@ function checkScheduledReports() {
   }
 }
 
-// ── 12. MAIN DISPATCH & POLLING LOOP ──
+// ── 12. MAIN DISPATCH LOOP ──
 async function getUpdates(offset) {
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
