@@ -2,6 +2,7 @@ import fetch from "node-fetch";
 import WebSocket from "ws";
 import fs from "fs";
 import path from "path";
+import "dotenv/config"; // <--- ADD THIS LINE
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
