@@ -220,10 +220,10 @@ async function fetchCurrentPrice(derivSymbol) {
       ws.on("message", (data) => {
         try {
           const r = JSON.parse(data);
-          if (r.history && r.history.prices) { 
-            clearTimeout(timeout); 
-            resolve(parseFloat(r.history.prices[r.history.prices.length - 1])); 
-            ws.close(); 
+          if (r.history && r.history.prices) {
+            clearTimeout(timeout);
+            resolve(parseFloat(r.history.prices[r.history.prices.length - 1]));
+            ws.close();
           }
         } catch {}
       });
@@ -240,10 +240,12 @@ function formatDuration(mins) {
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
-// Real realized P&L based on exact $3.60 Software TP / -$3.60 Software SL
+// ✅ FIX 1: Check t.profit (Deriv API field) before falling back to flat ±$3.60
 function getTradeRealizedPnl(t, repo) {
   if (typeof t.serverPnl === 'number') return t.serverPnl;
+  if (typeof t.profit === 'number') return t.profit;
   if (typeof t.pnl === 'number') return t.pnl;
+  // Flat fallback only when no real PnL data was persisted in trades.json
   if (t.result === "WIN") return 3.60;
   if (t.result === "LOSS") return -3.60;
   return 0;
@@ -252,8 +254,8 @@ function getTradeRealizedPnl(t, repo) {
 function filterReposByArgs(args) {
   if (!args || args.length === 0) return REPOS;
   const upperArgs = args.map(a => a.toUpperCase().replace(/^\//, "").replace(/^TODAY_/, "").replace(/^WEEKLY_/, "").replace(/^MONTHLY_/, "").replace(/^PERF_/, ""));
-  const matches = REPOS.filter(r => 
-    upperArgs.includes(r.symbol.toUpperCase()) || 
+  const matches = REPOS.filter(r =>
+    upperArgs.includes(r.symbol.toUpperCase()) ||
     upperArgs.includes(r.name.toUpperCase()) ||
     (r.altName && upperArgs.includes(r.altName.toUpperCase())) ||
     upperArgs.includes(r.derivSymbol.toUpperCase())
@@ -312,17 +314,17 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
 
   for (const { repo, trades, currentPrice } of allRepoData) {
     let openPositions = [];
-    
+
     if (Array.isArray(liveContracts)) {
       const brokerMatches = liveContracts.filter(c => {
         const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
         return sym === repo.derivSymbol;
       });
-      
+
       openPositions = await Promise.all(brokerMatches.map(async (bc) => {
         const details = await fetchContractDetails(bc.contract_id);
         const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
-        
+
         return {
           direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
           entry: details?.entry || localTrade?.entry || null,
@@ -349,7 +351,7 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       for (const open of openPositions) {
         const openDate = parseUtcDate(open.openTime);
         const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-        
+
         message += `🟡 OPEN: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
 
         let pnlDollars = open.livePnl;
@@ -366,21 +368,21 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
           const spotText = open.currentSpot ? ` (@ ${open.currentSpot.toFixed(4)})` : "";
           message += `${pnlIcon} Live Floating P&L: *${pnlStr}*${spotText}\n`;
         }
-        
+
         message += `⏱ Active: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
         if (open.contractId) message += `🎫 Contract: \`${open.contractId}\`\n`;
       }
       message += `\n`;
     } else {
       message += `⚪ No open trade\n`;
-      
+
       // Calculate today's closed trades
       const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
       const todayTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
         return cd && cd >= todayStart && cd <= todayEnd;
       });
-      
+
       if (todayTrades.length > 0) {
         const tw = todayTrades.filter(t => t.result === "WIN").length;
         const tl = todayTrades.filter(t => t.result === "LOSS").length;
@@ -432,7 +434,7 @@ async function handleSingleBot(repo) {
       const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
       return sym === repo.derivSymbol;
     });
-    
+
     openTrades = await Promise.all(matches.map(async (bc) => {
       const details = await fetchContractDetails(bc.contract_id);
       const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
@@ -458,7 +460,7 @@ async function handleSingleBot(repo) {
     const cd = parseUtcDate(t.closeTime);
     return cd && cd >= todayStart && cd <= todayEnd;
   });
-  
+
   const todayWins = todayTrades.filter(t => t.result === "WIN").length;
   const todayLosses = todayTrades.filter(t => t.result === "LOSS").length;
   const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
@@ -474,9 +476,9 @@ async function handleSingleBot(repo) {
     for (const open of openTrades) {
       const openDate = parseUtcDate(open.openTime);
       const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
-      
+
       msg += `• Direction: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
-      
+
       let pnlDollars = open.livePnl;
       if (pnlDollars === null && currentPrice !== null && open.entry) {
         const rawPnl = open.direction === "BUY"
@@ -490,7 +492,7 @@ async function handleSingleBot(repo) {
         const spotText = open.currentSpot ? ` (@ ${open.currentSpot.toFixed(4)})` : "";
         msg += `• Live P&L: *${pnlStr}*${spotText}\n`;
       }
-      
+
       msg += `• Duration: ${formatDuration(isNaN(nowMins) ? 0 : nowMins)}\n`;
       if (open.contractId) msg += `• Contract ID: \`${open.contractId}\`\n`;
     }
@@ -506,7 +508,7 @@ async function handleSingleBot(repo) {
     const cd = parseUtcDate(t.closeTime);
     return cd && cd >= weekStart && cd <= weekEnd;
   });
-  
+
   const weekWins = weekTrades.filter(t => t.result === "WIN").length;
   const weekLosses = weekTrades.filter(t => t.result === "LOSS").length;
   const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
@@ -537,9 +539,9 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
       return closeDate && closeDate >= startCutoff && closeDate <= endCutoff;
     });
 
-    if (pt.length === 0) { 
-      message += `*${repo.label}*\nNo trades in period.\n\n`; 
-      continue; 
+    if (pt.length === 0) {
+      message += `*${repo.label}*\nNo trades in period.\n\n`;
+      continue;
     }
 
     const wins = pt.filter(t => t.result === "WIN").length;
@@ -770,7 +772,7 @@ async function handleExposure() {
 
   for (const { repo, trades, currentPrice } of allRepoData) {
     if (!Array.isArray(liveContracts)) continue;
-    
+
     const matches = liveContracts.filter(c => {
       const sym = c.underlying_symbol || c.symbol || (c.shortcode ? c.shortcode.split("_")[1] : "");
       return sym === repo.derivSymbol;
@@ -787,7 +789,7 @@ async function handleExposure() {
       const localTrade = trades.find(t => String(t.contractId) === String(open.contract_id));
       const entry = details?.entry || localTrade?.entry || null;
       const direction = open.contract_type === "MULTUP" ? "BUY" : "SELL";
-      
+
       let pnlDollars = details?.profit ?? null;
       if (pnlDollars === null && currentPrice !== null && entry) {
         const rawPnl = direction === "BUY"
@@ -822,13 +824,14 @@ function parseReportArgs(args) {
   const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
   let fromDate = null, toDate = null;
   const dates = [], syms = [];
-  
+
   for (const token of args) {
     if (dateRegex.test(token)) dates.push(token);
     else if (symbolCodes.includes(token.toLowerCase())) syms.push(token.toUpperCase());
+    // ✅ FIX 2: Use UTC date math to avoid off-by-one errors near midnight
     else if (/^\d+$/.test(token) && !fromDate) {
       const d = new Date();
-      d.setDate(d.getDate() - parseInt(token));
+      d.setUTCDate(d.getUTCDate() - parseInt(token));
       fromDate = d.toISOString().slice(0, 10);
       toDate = new Date().toISOString().slice(0, 10);
     }
@@ -849,7 +852,7 @@ async function handleReport(args) {
   const filteredRepos = symbols.length > 0 ? REPOS.filter(r => symbols.includes(r.symbol)) : REPOS;
   const rangeLabel = isSingleDay ? fromDate : `${fromDate} → ${toDate}`;
   const symbolLabel = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
-  
+
   let message = `📊 *Report: ${rangeLabel}${symbolLabel}*\n\n`;
   let grandWins = 0, grandLosses = 0, grandPnl = 0, grandTotal = 0;
 
@@ -863,13 +866,13 @@ async function handleReport(args) {
     });
 
     if (pt.length === 0) { message += `*${repo.label}*\nNo trades in this period.\n\n`; continue; }
-    
+
     const wins = pt.filter(t => t.result === "WIN").length;
     const losses = pt.filter(t => t.result === "LOSS").length;
     const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
     const wr = ((wins / pt.length) * 100).toFixed(1);
     const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
-    
+
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
@@ -933,13 +936,13 @@ async function handlePerformance(args) {
       const s = phaseStats(closed, phase, repo);
       if (!s) continue;
       hasAny = true;
-      const label = phase === "UNKNOWN" 
-        ? "🔘 Legacy / Unknown" 
+      const label = phase === "UNKNOWN"
+        ? "🔘 Legacy / Unknown"
         : `${PHASE_LABELS[phase] || phase}`;
       const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$).toFixed(2)}`;
       const icon   = s.wr >= 60 ? "🟢" : s.wr >= 45 ? "🟡" : "🔴";
       message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net: *${netStr}*\n`;
-      
+
       grandStats[phase].count += s.count;
       grandStats[phase].wins  += s.wins;
       grandStats[phase].losses += s.losses;
@@ -1081,9 +1084,9 @@ async function main() {
           await sendTelegram(HELP_MANUAL);
         }
       }
-    } catch (err) { 
-      console.error("Poll error:", err.message); 
-      await new Promise(r => setTimeout(r, 5000)); 
+    } catch (err) {
+      console.error("Poll error:", err.message);
+      await new Promise(r => setTimeout(r, 5000));
     }
   }
 }
