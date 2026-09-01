@@ -25,7 +25,7 @@ loadEnv(path.join(home, "trading-bots/tea/.env"));
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
-const EXPECTED_STOPPED = ["trade-sync"];
+const EXPECTED_STOPPED = ["trade-sync", "pull-trades", "ice-cream-100-1s"];
 
 function sendTelegram(text) {
   return new Promise((resolve) => {
