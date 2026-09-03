@@ -2,21 +2,24 @@ import fetch from "node-fetch";
 import WebSocket from "ws";
 import fs from "fs";
 import path from "path";
-import "dotenv/config"; // <--- ADD THIS LINE
+import "dotenv/config";
 
 const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT  = process.env.TG_CHAT_ID;
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://138.2.169.72:3000";
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET;
 
+const S1_API_URL = "http://138.2.169.72:4001";
+const S1_API_SECRET = "s1_dash_9f2k4m";
+
 const REPOS = [
-  { name: "Test-Bot",       altName: "test-bot", label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16 },
-  { name: "OmniSight",      altName: "omnisight", label: "OmniSight (V50 Live)", symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16 },
-  { name: "Lery-s-Alerts",  altName: "lery-s-alerts", label: "Lery's Elite (V75)",   symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15 },
-  { name: "coffee",         altName: "Coffee", label: "Coffee Machine (V75S)", symbol: "V75S", isLive: false, is1s: true,  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15 },
-  { name: "milk",           altName: "Milk", label: "Milk Machine (V100)",   symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15 },
-  { name: "ice-cream",      altName: "Ice-Cream", label: "Ice Cream (V100S)", symbol: "V100S", isLive: false, is1s: true,  derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15 },
-  { name: "tea",            altName: "Tea", label: "Tea Machine (V25)",     symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15 },
+  { name: "Test-Bot",       altName: "test-bot",       label: "Test Bot (V10 Live)",   symbol: "V10",   isLive: true,  is1s: false, derivSymbol: "R_10",    multiplier: 400, commission: 0.16, server: 2 },
+  { name: "OmniSight",      altName: "omnisight",       label: "OmniSight (V50 Live)", symbol: "V50",   isLive: true,  is1s: false, derivSymbol: "R_50",    multiplier: 80,  commission: 0.16, server: 2 },
+  { name: "Lery-s-Alerts",  altName: "lery-s-alerts",  label: "Lery's Elite (V75)",   symbol: "V75",   isLive: false, is1s: false, derivSymbol: "R_75",    multiplier: 50,  commission: 0.15, server: 1 },
+  { name: "coffee",         altName: "Coffee",          label: "Coffee Machine (V75S)", symbol: "V75S", isLive: false, is1s: true,  derivSymbol: "1HZ75V",  multiplier: 50,  commission: 0.15, server: 1 },
+  { name: "milk",           altName: "Milk",            label: "Milk Machine (V100)",  symbol: "V100",  isLive: false, is1s: false, derivSymbol: "R_100",   multiplier: 40,  commission: 0.15, server: 1 },
+  { name: "ice-cream",      altName: "Ice-Cream",       label: "Ice Cream (V100S)",    symbol: "V100S", isLive: false, is1s: true,  derivSymbol: "1HZ100V", multiplier: 40,  commission: 0.15, server: 2 },
+  { name: "tea",            altName: "Tea",             label: "Tea Machine (V25)",    symbol: "V25",   isLive: false, is1s: false, derivSymbol: "R_25",    multiplier: 160, commission: 0.15, server: 1 },
 ];
 
 const PHASE_LABELS = {
@@ -139,7 +142,7 @@ async function fetchContractDetails(contractId) {
       if (poc) {
         return {
           entry: parseFloat(poc.entry_spot || poc.barrier || poc.entry_tick),
-          profit: typeof poc.profit === 'number' ? poc.profit : parseFloat(poc.profit),
+          profit: typeof poc.profit === "number" ? poc.profit : parseFloat(poc.profit),
           currentSpot: parseFloat(poc.current_spot || poc.bid_price),
           dateStart: poc.date_start ? poc.date_start * 1000 : null
         };
@@ -153,7 +156,6 @@ function deduplicateTrades(rawTrades) {
   const uniqueTrades = new Map();
   for (const t of rawTrades) {
     if (!t.contractId && t.result === "LOSS") continue;
-
     const key = t.contractId ? String(t.contractId) : (t.id ? String(t.id) : null);
     if (key) {
       const existing = uniqueTrades.get(key);
@@ -168,9 +170,9 @@ function deduplicateTrades(rawTrades) {
   return Array.from(uniqueTrades.values());
 }
 
-// ── DIRECT LOCAL + GATEWAY TRADES FETCHER (0ms Lag, No GitHub Dependency) ──
+// ── TRADES FETCHER — Local disk (Server 2 bots) → s1-api (Server 1 bots) ──
 async function fetchTradesJson(repo) {
-  // 1. Check Server 2 Local Hard Drive
+  // 1. Try local disk first (works for Server 2 bots: ice-cream, OmniSight, Test-Bot)
   const homeDir = process.env.HOME || "/home/ubuntu";
   const possiblePaths = [
     path.join(homeDir, "trading-bots", repo.name, "trades.json"),
@@ -190,22 +192,21 @@ async function fetchTradesJson(repo) {
     }
   }
 
-  // 2. Fetch directly from Server 1 Gateway via HTTP
-  if (GATEWAY_URL && GATEWAY_SECRET) {
-    const namesToTry = [repo.name, repo.altName, repo.name.toLowerCase()].filter(Boolean);
-    for (const n of namesToTry) {
-      try {
-        const res = await fetch(`${GATEWAY_URL}/trades/${n}`, {
-          headers: { "x-gateway-secret": GATEWAY_SECRET }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data) && data.length > 0) {
-            return deduplicateTrades(data);
-          }
+  // 2. Fetch from s1-api for Server 1 bots (Lery, Coffee, Milk, Tea)
+  //    The trading gateway has no /trades/ endpoint — use s1-api on port 4001 instead.
+  const namesToTry = [repo.name, repo.altName, repo.name.toLowerCase()].filter(Boolean);
+  for (const n of namesToTry) {
+    try {
+      const res = await fetch(`${S1_API_URL}/api/trades/${n}`, {
+        headers: { "x-dash-secret": S1_API_SECRET }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          return deduplicateTrades(data);
         }
-      } catch {}
-    }
+      }
+    } catch {}
   }
 
   return [];
@@ -236,16 +237,14 @@ function formatDuration(mins) {
   if (mins < 60) return `~${mins} min`;
   const h = Math.floor(mins / 60);
   const m = mins % 60;
-  const hStr = `${h} hour${h !== 1 ? 's' : ''}`;
+  const hStr = `${h} hour${h !== 1 ? "s" : ""}`;
   return m > 0 ? `~${hStr} ${m} min` : `~${hStr}`;
 }
 
-// ✅ FIX 1: Check t.profit (Deriv API field) before falling back to flat ±$3.60
 function getTradeRealizedPnl(t, repo) {
-  if (typeof t.serverPnl === 'number') return t.serverPnl;
-  if (typeof t.profit === 'number') return t.profit;
-  if (typeof t.pnl === 'number') return t.pnl;
-  // Flat fallback only when no real PnL data was persisted in trades.json
+  if (typeof t.serverPnl === "number") return t.serverPnl;
+  if (typeof t.profit === "number") return t.profit;
+  if (typeof t.pnl === "number") return t.pnl;
   if (t.result === "WIN") return 3.60;
   if (t.result === "LOSS") return -3.60;
   return 0;
@@ -273,26 +272,25 @@ function getUtcRange(daysBack, isYesterday = false) {
   let start, end;
   if (isYesterday) {
     start = new Date(Date.UTC(y, m, d - 1, 0, 0, 0, 0));
-    end = new Date(Date.UTC(y, m, d - 1, 23, 59, 59, 999));
+    end   = new Date(Date.UTC(y, m, d - 1, 23, 59, 59, 999));
   } else if (daysBack === 1) {
     start = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
-    end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+    end   = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
   } else {
     start = new Date(Date.UTC(y, m, d - daysBack + 1, 0, 0, 0, 0));
-    end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+    end   = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
   }
   return { start, end };
 }
 
 function getThisWeekUtcRange() {
   const now = new Date();
-  const dayOfWeek = now.getUTCDay(); // 0 = Sunday
+  const dayOfWeek = now.getUTCDay();
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth();
   const d = now.getUTCDate();
-
   const start = new Date(Date.UTC(y, m, d - dayOfWeek, 0, 0, 0, 0));
-  const end = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+  const end   = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
   return { start, end };
 }
 
@@ -324,12 +322,11 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
       openPositions = await Promise.all(brokerMatches.map(async (bc) => {
         const details = await fetchContractDetails(bc.contract_id);
         const localTrade = trades.find(t => String(t.contractId) === String(bc.contract_id));
-
         return {
           direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
           entry: details?.entry || localTrade?.entry || null,
           currentSpot: details?.currentSpot || currentPrice,
-          livePnl: (details && typeof details.profit === 'number') ? details.profit : null,
+          livePnl: (details && typeof details.profit === "number") ? details.profit : null,
           openTime: localTrade?.openTime || (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
           contractId: bc.contract_id
         };
@@ -376,7 +373,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
     } else {
       message += `⚪ No open trade\n`;
 
-      // Calculate today's closed trades
       const { start: todayStart, end: todayEnd } = getUtcRange(1, false);
       const todayTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -393,7 +389,6 @@ async function handleStatus(targetRepos = REPOS, title = "BOT STATUS REPORT", on
         message += `📅 Today: No closed trades\n`;
       }
 
-      // Calculate This Week (Sunday Start)
       const { start: weekStart, end: weekEnd } = getThisWeekUtcRange();
       const weekTrades = closed.filter(t => {
         const cd = parseUtcDate(t.closeTime);
@@ -442,7 +437,7 @@ async function handleSingleBot(repo) {
         direction: bc.contract_type === "MULTUP" ? "BUY" : "SELL",
         entry: details?.entry || localTrade?.entry || null,
         currentSpot: details?.currentSpot || currentPrice,
-        livePnl: (details && typeof details.profit === 'number') ? details.profit : null,
+        livePnl: (details && typeof details.profit === "number") ? details.profit : null,
         openTime: localTrade?.openTime || (bc.date_start ? new Date(bc.date_start * 1000).toISOString() : null),
         contractId: bc.contract_id
       };
@@ -461,9 +456,9 @@ async function handleSingleBot(repo) {
     return cd && cd >= todayStart && cd <= todayEnd;
   });
 
-  const todayWins = todayTrades.filter(t => t.result === "WIN").length;
+  const todayWins   = todayTrades.filter(t => t.result === "WIN").length;
   const todayLosses = todayTrades.filter(t => t.result === "LOSS").length;
-  const todayPnl = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
+  const todayPnl    = todayTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
   const todayPnlStr = todayPnl >= 0 ? `+$${todayPnl.toFixed(2)}` : `-$${Math.abs(todayPnl).toFixed(2)}`;
 
   let msg = `🤖 *${repo.label} Dashboard*\n`;
@@ -475,7 +470,7 @@ async function handleSingleBot(repo) {
     msg += `📍 *Active Position (Direct Broker Feed):*\n`;
     for (const open of openTrades) {
       const openDate = parseUtcDate(open.openTime);
-      const nowMins = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
+      const nowMins  = openDate ? Math.round((Date.now() - openDate.getTime()) / 60000) : 0;
 
       msg += `• Direction: *${open.direction}* @ ${open.entry ? Number(open.entry).toFixed(4) : "Market Spot"}\n`;
 
@@ -488,7 +483,7 @@ async function handleSingleBot(repo) {
       }
 
       if (pnlDollars !== null) {
-        const pnlStr = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
+        const pnlStr   = pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`;
         const spotText = open.currentSpot ? ` (@ ${open.currentSpot.toFixed(4)})` : "";
         msg += `• Live P&L: *${pnlStr}*${spotText}\n`;
       }
@@ -509,9 +504,9 @@ async function handleSingleBot(repo) {
     return cd && cd >= weekStart && cd <= weekEnd;
   });
 
-  const weekWins = weekTrades.filter(t => t.result === "WIN").length;
+  const weekWins   = weekTrades.filter(t => t.result === "WIN").length;
   const weekLosses = weekTrades.filter(t => t.result === "LOSS").length;
-  const weekPnl = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
+  const weekPnl    = weekTrades.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
   const weekPnlStr = weekPnl >= 0 ? `+$${weekPnl.toFixed(2)}` : `-$${Math.abs(weekPnl).toFixed(2)}`;
 
   msg += `\n📆 *This Week's Performance (Sun-Now):*\n`;
@@ -544,18 +539,18 @@ async function handleSummary(daysBack, label, args = [], isYesterday = false) {
       continue;
     }
 
-    const wins = pt.filter(t => t.result === "WIN").length;
-    const losses = pt.filter(t => t.result === "LOSS").length;
+    const wins      = pt.filter(t => t.result === "WIN").length;
+    const losses    = pt.filter(t => t.result === "LOSS").length;
     const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
-    const wr = ((wins / pt.length) * 100).toFixed(1);
-    const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
+    const wr        = ((wins / pt.length) * 100).toFixed(1);
+    const netStr    = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
 
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
 
   if (targetRepos.length > 1 && grandTotal > 0) {
-    const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
+    const grandWR  = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandStr = grandPnl >= 0 ? `+$${grandPnl.toFixed(2)}` : `-$${Math.abs(grandPnl).toFixed(2)}`;
     message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL COMBINED*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
   }
@@ -570,10 +565,10 @@ async function handleRanking() {
   const allRepoData = await Promise.all(REPOS.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
 
   const rankedList = allRepoData.map(({ repo, trades }) => {
-    const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
-    const wins = closed.filter(t => t.result === "WIN").length;
-    const losses = closed.filter(t => t.result === "LOSS").length;
-    const netPnl = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
+    const closed  = trades.filter(t => t.result && t.result !== "CANCELLED");
+    const wins    = closed.filter(t => t.result === "WIN").length;
+    const losses  = closed.filter(t => t.result === "LOSS").length;
+    const netPnl  = closed.reduce((sum, t) => sum + getTradeRealizedPnl(t, repo), 0);
     const winRate = closed.length ? (wins / closed.length) * 100 : 0;
     return { repo, total: closed.length, wins, losses, netPnl, winRate };
   }).sort((a, b) => b.netPnl - a.netPnl);
@@ -582,7 +577,7 @@ async function handleRanking() {
 
   rankedList.forEach((item, index) => {
     const pnlStr = item.netPnl >= 0 ? `+$${item.netPnl.toFixed(2)}` : `-$${Math.abs(item.netPnl).toFixed(2)}`;
-    const tag = item.repo.isLive ? "🟢 Live" : "🔵 Demo";
+    const tag    = item.repo.isLive ? "🟢 Live" : "🔵 Demo";
     message += `${medals[index]} *${item.repo.symbol}* (${item.repo.label.split(" ")[0]} - ${tag})\n`;
     message += `   Net: *${pnlStr}* | WR: *${item.winRate.toFixed(1)}%* | ${item.total} trades (W:${item.wins} L:${item.losses})\n\n`;
   });
@@ -608,25 +603,19 @@ async function handleStreaks() {
       continue;
     }
 
-    let currentStreakType = null;
-    let currentStreakCount = 0;
-    let maxWinStreak = 0;
-    let maxLossStreak = 0;
-    let tempWin = 0;
-    let tempLoss = 0;
+    let maxWinStreak = 0, maxLossStreak = 0, tempWin = 0, tempLoss = 0;
 
     closed.forEach(t => {
       if (t.result === "WIN") {
-        tempWin++;
-        tempLoss = 0;
+        tempWin++; tempLoss = 0;
         if (tempWin > maxWinStreak) maxWinStreak = tempWin;
       } else if (t.result === "LOSS") {
-        tempLoss++;
-        tempWin = 0;
+        tempLoss++; tempWin = 0;
         if (tempLoss > maxLossStreak) maxLossStreak = tempLoss;
       }
     });
 
+    let currentStreakType = null, currentStreakCount = 0;
     const lastResult = closed[closed.length - 1]?.result;
     if (lastResult) {
       currentStreakType = lastResult;
@@ -655,39 +644,28 @@ async function handleStats(args = []) {
 
   const allRepoData = await Promise.all(targetRepos.map(async (r) => ({ repo: r, trades: await fetchTradesJson(r) })));
 
-  let totalWinsCount = 0;
-  let totalLossCount = 0;
-  let totalGrossProfit = 0;
-  let totalGrossLoss = 0;
+  let totalWinsCount = 0, totalLossCount = 0, totalGrossProfit = 0, totalGrossLoss = 0;
 
   for (const { repo, trades } of allRepoData) {
     const closed = trades.filter(t => t.result && t.result !== "CANCELLED");
     if (closed.length === 0) continue;
 
-    let grossWin = 0;
-    let grossLoss = 0;
-    let wins = 0;
-    let losses = 0;
+    let grossWin = 0, grossLoss = 0, wins = 0, losses = 0;
 
     closed.forEach(t => {
       const pnl = getTradeRealizedPnl(t, repo);
-      if (pnl >= 0) {
-        grossWin += pnl;
-        wins++;
-      } else {
-        grossLoss += Math.abs(pnl);
-        losses++;
-      }
+      if (pnl >= 0) { grossWin += pnl; wins++; }
+      else { grossLoss += Math.abs(pnl); losses++; }
     });
 
-    const pf = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? "∞" : "0.00";
-    const avgWin = wins > 0 ? (grossWin / wins).toFixed(2) : "0.00";
+    const pf     = grossLoss > 0 ? (grossWin / grossLoss).toFixed(2) : grossWin > 0 ? "∞" : "0.00";
+    const avgWin  = wins   > 0 ? (grossWin  / wins).toFixed(2)   : "0.00";
     const avgLoss = losses > 0 ? (grossLoss / losses).toFixed(2) : "0.00";
 
-    totalWinsCount += wins;
-    totalLossCount += losses;
-    totalGrossProfit += grossWin;
-    totalGrossLoss += grossLoss;
+    totalWinsCount    += wins;
+    totalLossCount    += losses;
+    totalGrossProfit  += grossWin;
+    totalGrossLoss    += grossLoss;
 
     message += `*${repo.label}*\n`;
     message += `• Profit Factor: *${pf}*\n`;
@@ -696,9 +674,9 @@ async function handleStats(args = []) {
   }
 
   if (targetRepos.length > 1) {
-    const grandPF = totalGrossLoss > 0 ? (totalGrossProfit / totalGrossLoss).toFixed(2) : "∞";
-    const grandAvgWin = totalWinsCount > 0 ? (totalGrossProfit / totalWinsCount).toFixed(2) : "0.00";
-    const grandAvgLoss = totalLossCount > 0 ? (totalGrossLoss / totalLossCount).toFixed(2) : "0.00";
+    const grandPF     = totalGrossLoss > 0 ? (totalGrossProfit / totalGrossLoss).toFixed(2) : "∞";
+    const grandAvgWin  = totalWinsCount > 0 ? (totalGrossProfit / totalWinsCount).toFixed(2) : "0.00";
+    const grandAvgLoss = totalLossCount > 0 ? (totalGrossLoss   / totalLossCount).toFixed(2) : "0.00";
 
     message += `━━━━━━━━━━━━━━━━━━━━\n*📊 COMBINED PORTFOLIO STATS*\n`;
     message += `• Combined Profit Factor: *${grandPF}*\n`;
@@ -725,11 +703,9 @@ async function handleExtremeTrades(isBest = true) {
     });
   });
 
-  if (isBest) {
-    allTrades = allTrades.filter(t => t.pnlVal > 0).sort((a, b) => b.pnlVal - a.pnlVal);
-  } else {
-    allTrades = allTrades.filter(t => t.pnlVal < 0).sort((a, b) => a.pnlVal - b.pnlVal);
-  }
+  allTrades = isBest
+    ? allTrades.filter(t => t.pnlVal > 0).sort((a, b) => b.pnlVal - a.pnlVal)
+    : allTrades.filter(t => t.pnlVal < 0).sort((a, b) => a.pnlVal - b.pnlVal);
 
   const topTrades = allTrades.slice(0, 5);
 
@@ -737,8 +713,8 @@ async function handleExtremeTrades(isBest = true) {
     message += `No matching trades recorded yet.`;
   } else {
     topTrades.forEach((t, idx) => {
-      const phase = PHASE_LABELS[t.entryType] || t.entryType || "Standard";
-      const icon = isBest ? "🚀" : "🛑";
+      const phase   = PHASE_LABELS[t.entryType] || t.entryType || "Standard";
+      const icon    = isBest ? "🚀" : "🛑";
       const pnlSign = t.pnlVal >= 0 ? `+$${t.pnlVal.toFixed(2)}` : `-$${Math.abs(t.pnlVal).toFixed(2)}`;
       message += `*#${idx + 1} — ${t.repoLabel}* ${icon}\n`;
       message += `💰 P&L: *${pnlSign}* | ${t.direction} @ ${t.entry ? Number(t.entry).toFixed(4) : "N/A"}\n`;
@@ -765,10 +741,7 @@ async function handleExposure() {
     return { repo, trades, currentPrice };
   }));
 
-  let totalActiveContracts = 0;
-  let totalStakeDeployed = 0;
-  let totalUnrealizedPnl = 0;
-  let totalMaxRisk = 0;
+  let totalActiveContracts = 0, totalStakeDeployed = 0, totalUnrealizedPnl = 0, totalMaxRisk = 0;
 
   for (const { repo, trades, currentPrice } of allRepoData) {
     if (!Array.isArray(liveContracts)) continue;
@@ -785,10 +758,10 @@ async function handleExposure() {
       totalStakeDeployed += (open.buy_price || 5.00);
       totalMaxRisk += 5.00;
 
-      const details = await fetchContractDetails(open.contract_id);
+      const details    = await fetchContractDetails(open.contract_id);
       const localTrade = trades.find(t => String(t.contractId) === String(open.contract_id));
-      const entry = details?.entry || localTrade?.entry || null;
-      const direction = open.contract_type === "MULTUP" ? "BUY" : "SELL";
+      const entry      = details?.entry || localTrade?.entry || null;
+      const direction  = open.contract_type === "MULTUP" ? "BUY" : "SELL";
 
       let pnlDollars = details?.profit ?? null;
       if (pnlDollars === null && currentPrice !== null && entry) {
@@ -799,7 +772,9 @@ async function handleExposure() {
       }
 
       if (pnlDollars !== null) totalUnrealizedPnl += pnlDollars;
-      const pnlStr = (pnlDollars !== null) ? (pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`) : "N/A";
+      const pnlStr = (pnlDollars !== null)
+        ? (pnlDollars >= 0 ? `+$${pnlDollars.toFixed(2)}` : `-$${Math.abs(pnlDollars).toFixed(2)}`)
+        : "N/A";
 
       message += `*${repo.label}*: ${direction} @ ${entry ? Number(entry).toFixed(4) : "Market Spot"}\n`;
       message += `• Floating P&L: *${pnlStr}* | Hard Stop: $5.00\n`;
@@ -820,7 +795,7 @@ async function handleExposure() {
 
 // ── 9. CUSTOM REPORT PARSER & HANDLER (/report) ──
 function parseReportArgs(args) {
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  const dateRegex  = /^\d{4}-\d{2}-\d{2}$/;
   const symbolCodes = REPOS.map(r => r.symbol.toLowerCase());
   let fromDate = null, toDate = null;
   const dates = [], syms = [];
@@ -828,16 +803,15 @@ function parseReportArgs(args) {
   for (const token of args) {
     if (dateRegex.test(token)) dates.push(token);
     else if (symbolCodes.includes(token.toLowerCase())) syms.push(token.toUpperCase());
-    // ✅ FIX 2: Use UTC date math to avoid off-by-one errors near midnight
     else if (/^\d+$/.test(token) && !fromDate) {
       const d = new Date();
       d.setUTCDate(d.getUTCDate() - parseInt(token));
       fromDate = d.toISOString().slice(0, 10);
-      toDate = new Date().toISOString().slice(0, 10);
+      toDate   = new Date().toISOString().slice(0, 10);
     }
   }
-  if (dates.length === 1) { fromDate = dates[0]; toDate = dates[0]; }
-  else if (dates.length >= 2) { fromDate = dates[0]; toDate = dates[1]; }
+  if (dates.length === 1)      { fromDate = dates[0]; toDate = dates[0]; }
+  else if (dates.length >= 2)  { fromDate = dates[0]; toDate = dates[1]; }
   return { fromDate, toDate, symbols: syms };
 }
 
@@ -848,10 +822,10 @@ async function handleReport(args) {
 
   const from = new Date(fromDate + "T00:00:00Z");
   const to   = new Date(toDate   + "T23:59:59Z");
-  const isSingleDay = fromDate === toDate;
-  const filteredRepos = symbols.length > 0 ? REPOS.filter(r => symbols.includes(r.symbol)) : REPOS;
-  const rangeLabel = isSingleDay ? fromDate : `${fromDate} → ${toDate}`;
-  const symbolLabel = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
+  const isSingleDay     = fromDate === toDate;
+  const filteredRepos   = symbols.length > 0 ? REPOS.filter(r => symbols.includes(r.symbol)) : REPOS;
+  const rangeLabel      = isSingleDay ? fromDate : `${fromDate} → ${toDate}`;
+  const symbolLabel     = symbols.length > 0 ? ` | ${symbols.join(", ")}` : " | All Bots";
 
   let message = `📊 *Report: ${rangeLabel}${symbolLabel}*\n\n`;
   let grandWins = 0, grandLosses = 0, grandPnl = 0, grandTotal = 0;
@@ -867,18 +841,18 @@ async function handleReport(args) {
 
     if (pt.length === 0) { message += `*${repo.label}*\nNo trades in this period.\n\n`; continue; }
 
-    const wins = pt.filter(t => t.result === "WIN").length;
-    const losses = pt.filter(t => t.result === "LOSS").length;
+    const wins       = pt.filter(t => t.result === "WIN").length;
+    const losses     = pt.filter(t => t.result === "LOSS").length;
     const netDollars = pt.reduce((s, t) => s + getTradeRealizedPnl(t, repo), 0);
-    const wr = ((wins / pt.length) * 100).toFixed(1);
-    const netStr = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
+    const wr         = ((wins / pt.length) * 100).toFixed(1);
+    const netStr     = netDollars >= 0 ? `+$${netDollars.toFixed(2)}` : `-$${Math.abs(netDollars).toFixed(2)}`;
 
     message += `*${repo.label}*\nTrades: ${pt.length} | W: ${wins} | L: ${losses} | WR: ${wr}% | Net: *${netStr}*\n\n`;
     grandWins += wins; grandLosses += losses; grandPnl += netDollars; grandTotal += pt.length;
   }
 
   if (filteredRepos.length > 1 && grandTotal > 0) {
-    const grandWR = ((grandWins / grandTotal) * 100).toFixed(1);
+    const grandWR  = ((grandWins / grandTotal) * 100).toFixed(1);
     const grandStr = grandPnl >= 0 ? `+$${grandPnl.toFixed(2)}` : `-$${Math.abs(grandPnl).toFixed(2)}`;
     message += `━━━━━━━━━━━━━━━━━━━━\n*TOTAL COMBINED*\nTrades: ${grandTotal} | W: ${grandWins} | L: ${grandLosses} | WR: ${grandWR}%\nNet Realized P&L: *${grandStr}*`;
   }
@@ -899,20 +873,19 @@ function phaseStats(trades, phase, repo) {
 }
 
 async function handlePerformance(args) {
-  let cutoff = null;
-  let cutoffLabel = "All-Time";
-  const numArg = args.find(a => /^\d+$/.test(a));
-  const symArgs = args.filter(a => !/^\d+$/.test(a));
+  let cutoff = null, cutoffLabel = "All-Time";
+  const numArg   = args.find(a => /^\d+$/.test(a));
+  const symArgs  = args.filter(a => !/^\d+$/.test(a));
   const targetRepos = filterReposByArgs(symArgs);
 
   if (numArg) {
     const days = parseInt(numArg);
-    const now = new Date();
-    cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days + 1, 0, 0, 0, 0));
+    const now  = new Date();
+    cutoff      = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - days + 1, 0, 0, 0, 0));
     cutoffLabel = `Last ${days} Days`;
   }
 
-  const allPhases = ["PHASE_A", "PHASE_B", "PHASE_B_NO_PRIOR_A", "RECOVERED_LIVE", "PHASE_C", "PHASE_D", "UNKNOWN"];
+  const allPhases  = ["PHASE_A", "PHASE_B", "PHASE_B_NO_PRIOR_A", "RECOVERED_LIVE", "PHASE_C", "PHASE_D", "UNKNOWN"];
   const grandStats = {};
   allPhases.forEach(p => { grandStats[p] = { count: 0, wins: 0, losses: 0, net$: 0 }; });
 
@@ -936,17 +909,15 @@ async function handlePerformance(args) {
       const s = phaseStats(closed, phase, repo);
       if (!s) continue;
       hasAny = true;
-      const label = phase === "UNKNOWN"
-        ? "🔘 Legacy / Unknown"
-        : `${PHASE_LABELS[phase] || phase}`;
+      const label  = phase === "UNKNOWN" ? "🔘 Legacy / Unknown" : (PHASE_LABELS[phase] || phase);
       const netStr = s.net$ >= 0 ? `+$${s.net$.toFixed(2)}` : `-$${Math.abs(s.net$).toFixed(2)}`;
       const icon   = s.wr >= 60 ? "🟢" : s.wr >= 45 ? "🟡" : "🔴";
       message += `${icon} ${label}\n   ${s.count} trades | W:${s.wins} L:${s.losses} | WR:${s.wr}% | Net: *${netStr}*\n`;
 
-      grandStats[phase].count += s.count;
-      grandStats[phase].wins  += s.wins;
-      grandStats[phase].losses += s.losses;
-      grandStats[phase].net$  += s.net$;
+      grandStats[phase].count   += s.count;
+      grandStats[phase].wins    += s.wins;
+      grandStats[phase].losses  += s.losses;
+      grandStats[phase].net$    += s.net$;
     }
     if (!hasAny) message += `  No closed trades in period.\n`;
   }
@@ -974,12 +945,12 @@ async function handlePerformance(args) {
 let lastReportSent = { daily: null, weekly: null, monthly: null };
 
 function checkScheduledReports() {
-  const now = new Date();
+  const now      = new Date();
   const utcHours = now.getUTCHours();
-  const utcMins = now.getUTCMinutes();
-  const utcDay = now.getUTCDay();
-  const utcDate = now.getUTCDate();
-  const dateKey = now.toISOString().slice(0, 10);
+  const utcMins  = now.getUTCMinutes();
+  const utcDay   = now.getUTCDay();
+  const utcDate  = now.getUTCDate();
+  const dateKey  = now.toISOString().slice(0, 10);
 
   if (utcHours === 0 && utcMins === 0 && lastReportSent.daily !== dateKey) {
     lastReportSent.daily = dateKey;
@@ -1000,7 +971,7 @@ function checkScheduledReports() {
 // ── 12. MAIN DISPATCH LOOP ──
 async function getUpdates(offset) {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
+    const res  = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${offset}&timeout=20`);
     const data = await res.json();
     return data.ok ? data.result : [];
   } catch { return []; }
@@ -1018,9 +989,9 @@ async function main() {
         offset = update.update_id + 1;
         const raw = update.message?.text?.trim() || "";
         if (!raw) continue;
-        const parts = raw.split(/\s+/);
+        const parts   = raw.split(/\s+/);
         const command = parts[0].toLowerCase();
-        const args = parts.slice(1);
+        const args    = parts.slice(1);
         console.log(`💬 Command received: ${raw}`);
 
         if (command === "/menu" || command === "/start") {
@@ -1050,7 +1021,7 @@ async function main() {
         } else if (command === "/standard") {
           await handleStatus(REPOS.filter(r => !r.is1s), "STANDARD VOLATILITY INDICES", false);
         } else if (["/v10", "/v50", "/v75", "/v75s", "/v100", "/v100s", "/v25"].includes(command)) {
-          const sym = command.replace("/", "").toUpperCase();
+          const sym    = command.replace("/", "").toUpperCase();
           const target = REPOS.find(r => r.symbol.toUpperCase() === sym);
           if (target) await handleSingleBot(target);
         } else if (command === "/today" || command === "/daily" || command.startsWith("/today_") || command.startsWith("/daily_")) {
